@@ -22,6 +22,7 @@ import {
   extractHevcParameterSetsFromAnnexB,
   buildHvccDecoderConfig,
 } from '../utils/hevc.js';
+import { NodeAvVideoEncoder } from '../node-av/NodeAvVideoEncoder.js';
 import type { HardwareAccelerationMethod } from '../hardware/index.js';
 import {
   getBestEncoderSync,
@@ -45,6 +46,8 @@ export interface VideoEncoderConfig {
   bitrateMode?: 'constant' | 'variable' | 'quantizer';
   latencyMode?: 'quality' | 'realtime';
   format?: 'annexb' | 'mp4';
+  /** Backend selection: defaults to node-av, falls back to ffmpeg CLI */
+  backend?: 'node-av' | 'ffmpeg';
 }
 
 export interface VideoEncoderInit {
@@ -78,7 +81,8 @@ export class VideoEncoder extends EventEmitter {
   private _config: VideoEncoderConfig | null = null;
   private _outputCallback: (chunk: EncodedVideoChunk, metadata?: VideoEncoderOutputMetadata) => void;
   private _errorCallback: (error: Error) => void;
-  private _ffmpeg: FFmpegProcess | null = null;
+  private _ffmpeg: FFmpegProcess | NodeAvVideoEncoder | null = null;
+  private _backendName: 'node-av' | 'ffmpeg' = 'node-av';
   private _frameCount = 0;
   private _keyFrameInterval = 30;
   private _pendingFrames: { timestamp: number; duration: number | null; keyFrame: boolean }[] = [];
@@ -326,8 +330,9 @@ export class VideoEncoder extends EventEmitter {
   private _startFFmpeg(inputFormat?: string): void {
     if (!this._config) return;
 
-    this._ffmpeg = new FFmpegProcess();
     const ffmpegFormat = inputFormat || 'yuv420p';
+    this._ffmpeg = this._createEncoderProcess(ffmpegFormat);
+    this._backendName = this._ffmpeg instanceof NodeAvVideoEncoder ? 'node-av' : 'ffmpeg';
 
     const hardwareArgs = this._getHardwareEncoderArgs();
 
@@ -362,6 +367,25 @@ export class VideoEncoder extends EventEmitter {
       this._ffmpeg.kill();
       this._ffmpeg = null;
     }
+  }
+
+  private _createEncoderProcess(pixelFormat: string): FFmpegProcess | NodeAvVideoEncoder {
+    const requestedBackend = this._config?.backend ?? process.env.WEBCODECS_BACKEND ?? 'node-av';
+    const codecBase = this._config?.codec?.split('.')[0].toLowerCase();
+    const vpCodec = codecBase === 'vp8' || codecBase === 'vp9' || codecBase === 'vp09';
+
+    if (requestedBackend !== 'ffmpeg' && !vpCodec && this._canUseNodeAv(pixelFormat)) {
+      try {
+        return new NodeAvVideoEncoder();
+      } catch {
+        // Fall through to ffmpeg CLI
+      }
+    }
+    return new FFmpegProcess();
+  }
+
+  private _canUseNodeAv(_pixelFormat: string): boolean {
+    return true;
   }
 
   private _selectHardwareEncoder(codec: string): {

@@ -572,6 +572,10 @@ npm run demo:hwaccel
 
 # Hardware vs software encoding comparison
 npm run demo:hwaccel-conversion
+
+# Video quadrant compositor demo (WebGPU four-up render → MP4)
+# Requires Node 20+; set hardwareAcceleration in src/demos/demo-four-corners.ts to 'prefer-hardware' if VAAPI/NVENC/QSV are available
+npm run demo:fourcorners
 ```
 
 ## API Compatibility
