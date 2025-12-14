@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 
-import { Encoder, HardwareContext, FilterAPI } from 'node-av/api';
+import { Encoder, HardwareContext } from 'node-av/api';
 import { Frame, Rational } from 'node-av/lib';
 import {
   AV_PIX_FMT_BGRA,
@@ -38,13 +38,14 @@ type EncoderOptions = EncoderConfig & { latencyMode?: 'quality' | 'realtime'; bi
 export class NodeAvVideoEncoder extends EventEmitter {
   private encoder: Encoder | null = null;
   private hardware: HardwareContext | null = null;
-  private filter: FilterAPI | null = null;
   private config: EncoderOptions | null = null;
   private frameIndex = 0;
   private queue: Buffer[] = [];
   private processing = false;
+  private processingPromise: Promise<void> | null = null;
   private shuttingDown = false;
   private pixelFormat: AVPixelFormat = AV_PIX_FMT_YUV420P;
+  private encoderPixelFormat: AVPixelFormat = AV_PIX_FMT_YUV420P; // Format encoder expects
   private timeBase: Rational = new Rational(1, 30);
 
   get isHealthy(): boolean {
@@ -102,19 +103,28 @@ export class NodeAvVideoEncoder extends EventEmitter {
   }
 
   private async processQueue(): Promise<void> {
-    if (this.processing) return;
-    this.processing = true;
-
-    try {
-      while (this.queue.length > 0) {
-        const data = this.queue.shift()!;
-        await this.encodeBuffer(data);
-      }
-    } catch (err) {
-      this.emit('error', err instanceof Error ? err : new Error(String(err)));
-    } finally {
-      this.processing = false;
+    if (this.processingPromise) {
+      return this.processingPromise;
     }
+
+    this.processingPromise = (async () => {
+      if (this.processing) return;
+      this.processing = true;
+
+      try {
+        while (this.queue.length > 0) {
+          const data = this.queue.shift()!;
+          await this.encodeBuffer(data);
+        }
+      } catch (err) {
+        this.emit('error', err instanceof Error ? err : new Error(String(err)));
+      } finally {
+        this.processing = false;
+        this.processingPromise = null;
+      }
+    })();
+
+    return this.processingPromise;
   }
 
   private async ensureEncoder(): Promise<void> {
@@ -126,77 +136,143 @@ export class NodeAvVideoEncoder extends EventEmitter {
     const framerate = this.config.framerate ?? 30;
     const gopSize = Math.max(1, framerate);
 
-    const encoderCodec = await this.selectEncoderCodec(codecName);
+    const { encoderCodec, isHardware } = await this.selectEncoderCodec(codecName);
     const options = this.buildEncoderOptions(codecName, framerate, gopSize);
 
-    // Insert format conversion filter if needed (e.g., RGBA -> NV12)
-    const needsConversion = this.pixelFormat === AV_PIX_FMT_RGBA || this.pixelFormat === AV_PIX_FMT_BGRA;
-    if (needsConversion) {
-      this.filter = FilterAPI.create('format=nv12', {});
+    // Determine encoder pixel format based on input format and whether hardware is used
+    const isRgba = this.pixelFormat === AV_PIX_FMT_RGBA || this.pixelFormat === AV_PIX_FMT_BGRA;
+    const isNv12Input = this.pixelFormat === AV_PIX_FMT_NV12;
+
+    if (isHardware) {
+      // Hardware encoders typically require NV12
+      this.encoderPixelFormat = AV_PIX_FMT_NV12;
       options.pixelFormat = AV_PIX_FMT_NV12;
-      console.log('[NodeAvVideoEncoder] Converting input to NV12 for encoder');
+      if (isRgba) {
+        console.log('[NodeAvVideoEncoder] Converting RGBA input to NV12 for hardware encoder');
+      } else if (!isNv12Input) {
+        console.log('[NodeAvVideoEncoder] Converting input to NV12 for hardware encoder');
+      }
+    } else {
+      // Software encoders typically use YUV420P
+      this.encoderPixelFormat = AV_PIX_FMT_YUV420P;
+      options.pixelFormat = AV_PIX_FMT_YUV420P;
+      if (isRgba) {
+        console.log('[NodeAvVideoEncoder] Converting RGBA input to I420 for software encoder');
+      } else if (isNv12Input) {
+        console.log('[NodeAvVideoEncoder] Converting NV12 input to I420 for software encoder');
+      }
     }
 
-    this.encoder = await Encoder.create(encoderCodec, options);
+    try {
+      this.encoder = await Encoder.create(encoderCodec, options);
+    } catch (hwErr) {
+      // If hardware encoder fails, try software fallback
+      if (isHardware) {
+        console.log(`[NodeAvVideoEncoder] Hardware encoder failed, falling back to software: ${(hwErr as Error).message}`);
+        this.hardware?.dispose();
+        this.hardware = null;
+
+        const softwareCodec = this.getSoftwareEncoder(codecName);
+        this.encoderPixelFormat = AV_PIX_FMT_YUV420P;
+        options.pixelFormat = AV_PIX_FMT_YUV420P;
+        options.hardware = undefined;
+        this.encoder = await Encoder.create(softwareCodec as FFEncoderCodec, options);
+      } else {
+        throw hwErr;
+      }
+    }
   }
 
-  private async selectEncoderCodec(codecName: string): Promise<any> {
-    // Try hardware first
-    try {
-      this.hardware = HardwareContext.auto();
-      if (this.hardware) {
-        const hwCodec = this.hardware.getEncoderCodec(codecName as any);
-        if (hwCodec) {
-          console.log(
-            `[NodeAvVideoEncoder] Using hardware encoder ${hwCodec.name ?? hwCodec} (${this.hardware.deviceTypeName})`
-          );
-          return hwCodec;
+  private getSoftwareEncoder(codecName: string): string {
+    switch (codecName) {
+      case 'h264': return 'libx264';
+      case 'hevc': return 'libx265';
+      case 'vp8': return 'libvpx';
+      case 'vp9': return 'libvpx-vp9';
+      case 'av1': return 'libsvtav1';
+      default: return codecName;
+    }
+  }
+
+  private async selectEncoderCodec(codecName: string): Promise<{ encoderCodec: any; isHardware: boolean }> {
+    // Check if hardware acceleration is requested (default to no-preference for stability)
+    const hwPref = (this.config as any)?.hardwareAcceleration as
+      | 'prefer-hardware'
+      | 'prefer-software'
+      | 'no-preference'
+      | undefined;
+
+    // Only try hardware if explicitly requested
+    // QSV VP9/AV1 encoders are known to have issues, so skip them
+    const skipHardwareCodecs = ['vp9', 'av1']; // Known problematic HW encoders
+    const shouldTryHardware = hwPref === 'prefer-hardware' && !skipHardwareCodecs.includes(codecName);
+
+    if (shouldTryHardware) {
+      try {
+        this.hardware = HardwareContext.auto();
+        if (this.hardware) {
+          const hwCodec = this.hardware.getEncoderCodec(codecName as any);
+          if (hwCodec) {
+            console.log(
+              `[NodeAvVideoEncoder] Using hardware encoder ${hwCodec.name ?? hwCodec} (${this.hardware.deviceTypeName})`
+            );
+            return { encoderCodec: hwCodec, isHardware: true };
+          }
         }
+      } catch {
+        // Ignore hardware failures; fall back to software
+        this.hardware?.dispose();
+        this.hardware = null;
       }
-    } catch {
-      // Ignore hardware failures; fall back to software
-      this.hardware?.dispose();
-      this.hardware = null;
     }
 
-    // Software fallback
-    switch (codecName) {
-      case 'h264':
-        console.log('[NodeAvVideoEncoder] Falling back to software encoder libx264');
-        return FF_ENCODER_LIBX264;
-      case 'hevc':
-        console.log('[NodeAvVideoEncoder] Falling back to software encoder libx265');
-        return FF_ENCODER_LIBX265;
-      case 'vp8':
-        console.log('[NodeAvVideoEncoder] Falling back to software encoder libvpx_vp8');
-        return FF_ENCODER_LIBVPX_VP8;
-      case 'vp9':
-        console.log('[NodeAvVideoEncoder] Falling back to software encoder libvpx_vp9');
-        return FF_ENCODER_LIBVPX_VP9;
-      case 'av1':
-        console.log('[NodeAvVideoEncoder] Falling back to software encoder libaom-av1');
-        return FF_ENCODER_LIBAOM_AV1;
-      default:
-        return codecName as FFEncoderCodec;
-    }
+    // Software encoder - use actual FFmpeg encoder names (with hyphens where needed)
+    const softwareCodec = this.getSoftwareEncoder(codecName);
+    console.log(`[NodeAvVideoEncoder] Using software encoder ${softwareCodec}`);
+    return { encoderCodec: softwareCodec as FFEncoderCodec, isHardware: false };
   }
 
   private buildEncoderOptions(codecName: string, framerate: number, gopSize: number) {
     const options: Record<string, string | number> = {};
+    const isVpCodec = codecName === 'vp8' || codecName === 'vp9';
+    const isAv1 = codecName === 'av1';
 
     // Latency and bitrate hints (hardware-safe defaults)
     const hwType = this.hardware?.deviceTypeName;
-    if (this.config?.latencyMode === 'realtime') {
-      if (hwType === 'qsv') {
-        options.preset = 'veryfast';
-      } else if (!hwType) {
-        options.preset = 'ultrafast';
+
+    // VP8/VP9/AV1 use different options than x264/x265
+    if (isVpCodec) {
+      // libvpx options
+      if (this.config?.latencyMode === 'realtime') {
+        options.deadline = 'realtime';
+        options['cpu-used'] = '8';
+        options['lag-in-frames'] = '0';
+      } else {
+        options.deadline = 'good';
+        options['cpu-used'] = '4';
+      }
+    } else if (isAv1) {
+      // libsvtav1 options (different from libaom-av1)
+      // SVT-AV1 uses 'preset' (0-13, lower = better quality, slower)
+      if (this.config?.latencyMode === 'realtime') {
+        options.preset = '10'; // Fast preset for realtime
+      } else {
+        options.preset = '6'; // Balanced preset
       }
     } else {
-      if (hwType === 'qsv') {
-        options.preset = 'medium';
-      } else if (!hwType) {
-        options.preset = 'medium';
+      // x264/x265 options
+      if (this.config?.latencyMode === 'realtime') {
+        if (hwType === 'qsv') {
+          options.preset = 'veryfast';
+        } else if (!hwType) {
+          options.preset = 'ultrafast';
+        }
+      } else {
+        if (hwType === 'qsv') {
+          options.preset = 'medium';
+        } else if (!hwType) {
+          options.preset = 'medium';
+        }
       }
     }
 
@@ -204,9 +280,18 @@ export class NodeAvVideoEncoder extends EventEmitter {
       // Rough CRF defaults
       if (codecName === 'h264' || codecName === 'hevc') {
         options.crf = '23';
-      } else if (codecName === 'av1') {
-        options.cq_level = '30';
+      } else if (isVpCodec) {
+        options.crf = '31';
+      } else if (isAv1) {
+        options.crf = '30';
       }
+    }
+
+    // VP8/VP9/AV1 require bitrate to be set for proper encoding
+    // Use default if not specified
+    let bitrate = this.config?.bitrate;
+    if (!bitrate && (isVpCodec || isAv1)) {
+      bitrate = 500_000; // Default 500kbps for VP/AV1
     }
 
     return {
@@ -216,7 +301,7 @@ export class NodeAvVideoEncoder extends EventEmitter {
       pixelFormat: this.pixelFormat,
       timeBase: this.timeBase,
       frameRate: new Rational(framerate, 1),
-      bitrate: this.config?.bitrate,
+      bitrate,
       gopSize,
       maxBFrames: this.config?.latencyMode === 'realtime' ? 0 : undefined,
       hardware: this.hardware ?? undefined,
@@ -230,53 +315,71 @@ export class NodeAvVideoEncoder extends EventEmitter {
       throw new Error('Encoder not initialized');
     }
 
-    const inputFrame = Frame.fromVideoBuffer(buffer, {
-      width: this.config.width,
-      height: this.config.height,
-      format: this.pixelFormat,
-      timeBase: this.timeBase,
-    });
-    inputFrame.pts = BigInt(this.frameIndex);
+    let frame: Frame;
 
-    const framesToEncode: Frame[] = [];
-
-    if (this.filter) {
-      // Convert to encoder-friendly format
-      const filtered = await this.filter.processAll(inputFrame);
-      inputFrame.unref();
-      if (filtered && filtered.length > 0) {
-        framesToEncode.push(...filtered);
+    // Convert input to format encoder expects
+    if (this.pixelFormat === AV_PIX_FMT_RGBA || this.pixelFormat === AV_PIX_FMT_BGRA) {
+      // RGBA/BGRA input - convert to encoder format
+      let convertedData: Uint8Array;
+      if (this.encoderPixelFormat === AV_PIX_FMT_NV12) {
+        convertedData = convertRgbaToNv12(buffer, this.config.width, this.config.height);
+      } else {
+        convertedData = convertRgbaToI420(buffer, this.config.width, this.config.height);
       }
+      frame = Frame.fromVideoBuffer(Buffer.from(convertedData), {
+        width: this.config.width,
+        height: this.config.height,
+        format: this.encoderPixelFormat,
+        timeBase: this.timeBase,
+      });
+    } else if (this.pixelFormat === AV_PIX_FMT_NV12 && this.encoderPixelFormat === AV_PIX_FMT_YUV420P) {
+      // NV12 input but encoder expects I420 - convert
+      const convertedData = convertNv12ToI420(buffer, this.config.width, this.config.height);
+      frame = Frame.fromVideoBuffer(Buffer.from(convertedData), {
+        width: this.config.width,
+        height: this.config.height,
+        format: AV_PIX_FMT_YUV420P,
+        timeBase: this.timeBase,
+      });
     } else {
-      framesToEncode.push(inputFrame);
+      // Direct pass-through (I420 input to I420 encoder, etc.)
+      frame = Frame.fromVideoBuffer(buffer, {
+        width: this.config.width,
+        height: this.config.height,
+        format: this.pixelFormat,
+        timeBase: this.timeBase,
+      });
     }
+    frame.pts = BigInt(this.frameIndex);
 
-    for (const frame of framesToEncode) {
-      await this.encoder.encode(frame);
-      frame.unref();
+    await this.encoder.encode(frame);
+    frame.unref();
 
-      let packet = await this.encoder.receive();
-      while (packet) {
-        if (packet.data) {
-          const timestamp = packet.pts !== undefined ? Number(packet.pts) : this.frameIndex;
-          const keyFrame = (packet.flags & AV_PKT_FLAG_KEY) === AV_PKT_FLAG_KEY || packet.isKeyframe;
-          this.emit('encodedFrame', {
-            data: Buffer.from(packet.data),
-            timestamp,
-            keyFrame,
-          });
-        }
-        packet.unref();
-        packet = await this.encoder.receive();
+    let packet = await this.encoder.receive();
+    while (packet) {
+      if (packet.data) {
+        const timestamp = packet.pts !== undefined ? Number(packet.pts) : this.frameIndex;
+        const keyFrame = (packet.flags & AV_PKT_FLAG_KEY) === AV_PKT_FLAG_KEY || packet.isKeyframe;
+        console.log(`[NodeAvVideoEncoder] Emitting packet size=${packet.data.length}, key=${keyFrame}`);
+        this.emit('encodedFrame', {
+          data: Buffer.from(packet.data),
+          timestamp,
+          keyFrame,
+        });
       }
-
-      this.frameIndex++;
+      packet.unref();
+      packet = await this.encoder.receive();
     }
+
+    this.frameIndex++;
   }
 
   private async finish(): Promise<void> {
-    // Drain pending work
+    // Drain pending work (wait for any in-flight processing)
     await this.processQueue();
+    if (this.processingPromise) {
+      await this.processingPromise;
+    }
 
     if (this.encoder) {
       try {
@@ -305,8 +408,6 @@ export class NodeAvVideoEncoder extends EventEmitter {
   }
 
   private cleanup(): void {
-    this.filter?.close();
-    this.filter = null;
     this.encoder?.close();
     this.encoder = null;
     this.hardware?.dispose();
@@ -335,7 +436,127 @@ function mapPixelFormat(format: string): AVPixelFormat {
     case 'BGRA':
       return AV_PIX_FMT_BGRA;
     case 'RGBA':
-    default:
       return AV_PIX_FMT_RGBA;
+    default:
+      return AV_PIX_FMT_YUV420P;
   }
+}
+
+function convertRgbaToI420(rgba: Buffer | Uint8Array, width: number, height: number): Uint8Array {
+  const ySize = width * height;
+  const uvSize = (width / 2) * (height / 2);
+  const out = new Uint8Array(ySize + 2 * uvSize);
+  const yPlane = out.subarray(0, ySize);
+  const uPlane = out.subarray(ySize, ySize + uvSize);
+  const vPlane = out.subarray(ySize + uvSize);
+
+  for (let j = 0; j < height; j += 2) {
+    for (let i = 0; i < width; i += 2) {
+      let uSum = 0;
+      let vSum = 0;
+
+      for (let dy = 0; dy < 2; dy++) {
+        for (let dx = 0; dx < 2; dx++) {
+          const x = i + dx;
+          const y = j + dy;
+          const idx = (y * width + x) * 4;
+          const r = rgba[idx];
+          const g = rgba[idx + 1];
+          const b = rgba[idx + 2];
+
+          const yVal = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+          yPlane[y * width + x] = clampByte(yVal);
+
+          const uVal = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+          const vVal = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+          uSum += uVal;
+          vSum += vVal;
+        }
+      }
+
+      uPlane[(j / 2) * (width / 2) + i / 2] = clampByte(uSum >> 2);
+      vPlane[(j / 2) * (width / 2) + i / 2] = clampByte(vSum >> 2);
+    }
+  }
+
+  return out;
+}
+
+function clampByte(val: number): number {
+  return Math.max(0, Math.min(255, val));
+}
+
+/**
+ * Convert NV12 (Y + interleaved UV) to I420 (Y + U + V planar)
+ */
+function convertNv12ToI420(nv12: Buffer | Uint8Array, width: number, height: number): Uint8Array {
+  const ySize = width * height;
+  const uvWidth = width / 2;
+  const uvHeight = height / 2;
+  const uvPlaneSize = uvWidth * uvHeight;
+  const uvInterleavedSize = uvPlaneSize * 2;
+
+  const out = new Uint8Array(ySize + 2 * uvPlaneSize);
+  const yPlane = out.subarray(0, ySize);
+  const uPlane = out.subarray(ySize, ySize + uvPlaneSize);
+  const vPlane = out.subarray(ySize + uvPlaneSize);
+
+  // Copy Y plane directly
+  yPlane.set(nv12.subarray(0, ySize));
+
+  // De-interleave UV plane
+  const uvInterleaved = nv12.subarray(ySize, ySize + uvInterleavedSize);
+  for (let i = 0; i < uvPlaneSize; i++) {
+    uPlane[i] = uvInterleaved[i * 2];
+    vPlane[i] = uvInterleaved[i * 2 + 1];
+  }
+
+  return out;
+}
+
+/**
+ * Convert RGBA to NV12 (Y plane followed by interleaved UV plane)
+ * NV12 is: Y plane (width*height) + UV plane interleaved (width*height/2)
+ */
+function convertRgbaToNv12(rgba: Buffer | Uint8Array, width: number, height: number): Uint8Array {
+  const ySize = width * height;
+  const uvSize = (width / 2) * (height / 2) * 2; // Interleaved UV
+  const out = new Uint8Array(ySize + uvSize);
+  const yPlane = out.subarray(0, ySize);
+  const uvPlane = out.subarray(ySize);
+
+  for (let j = 0; j < height; j += 2) {
+    for (let i = 0; i < width; i += 2) {
+      let uSum = 0;
+      let vSum = 0;
+
+      for (let dy = 0; dy < 2; dy++) {
+        for (let dx = 0; dx < 2; dx++) {
+          const x = i + dx;
+          const y = j + dy;
+          const idx = (y * width + x) * 4;
+
+          const r = rgba[idx];
+          const g = rgba[idx + 1];
+          const b = rgba[idx + 2];
+
+          // BT.601 coefficients
+          const yVal = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+          yPlane[y * width + x] = clampByte(yVal);
+
+          const uVal = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+          const vVal = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+          uSum += uVal;
+          vSum += vVal;
+        }
+      }
+
+      // NV12 has interleaved UV: UVUVUV...
+      const uvIdx = (j / 2) * width + i; // UV row is width bytes (interleaved pairs)
+      uvPlane[uvIdx] = clampByte(uSum >> 2);     // U
+      uvPlane[uvIdx + 1] = clampByte(vSum >> 2); // V
+    }
+  }
+
+  return out;
 }

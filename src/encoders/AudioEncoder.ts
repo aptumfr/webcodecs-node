@@ -17,6 +17,7 @@ import {
   AUDIO_ENCODER_CODEC_MAP,
 } from '../ffmpeg/audio-codecs.js';
 import { buildAudioSpecificConfig, stripAdtsHeader } from '../utils/aac.js';
+import { NodeAvAudioEncoder } from '../node-av/NodeAvAudioEncoder.js';
 
 const logger = createLogger('AudioEncoder');
 
@@ -30,6 +31,7 @@ export interface AudioEncoderConfig {
   bitrateMode?: 'constant' | 'variable';
   latencyMode?: 'quality' | 'realtime';
   format?: 'adts' | 'aac';
+  backend?: 'node-av' | 'ffmpeg';
 }
 
 export interface AudioEncoderInit {
@@ -53,13 +55,23 @@ export interface AudioEncoderSupport {
 
 const DEFAULT_FLUSH_TIMEOUT = 30000;
 
+interface EncoderBackend {
+  write(data: Buffer): boolean;
+  end(): void;
+  kill(): void;
+  on(event: string, handler: (...args: any[]) => void): void;
+  once(event: string, handler: (...args: any[]) => void): void;
+  isHealthy: boolean;
+}
+
 export class AudioEncoder extends EventEmitter {
   private _state: CodecState = 'unconfigured';
   private _encodeQueueSize = 0;
   private _config: AudioEncoderConfig | null = null;
   private _outputCallback: (chunk: EncodedAudioChunk, metadata?: AudioEncoderOutputMetadata) => void;
   private _errorCallback: (error: Error) => void;
-  private _process: ChildProcess | null = null;
+  private _backend: EncoderBackend | null = null;
+  private _backendName: 'node-av' | 'ffmpeg' = 'node-av';
   private _frameCount = 0;
   private _firstChunk = true;
   private _accumulatedData: Buffer = Buffer.alloc(0);
@@ -84,8 +96,9 @@ export class AudioEncoder extends EventEmitter {
   get state(): CodecState { return this._state; }
   get encodeQueueSize(): number { return this._encodeQueueSize; }
 
-  private get _isProcessHealthy(): boolean {
-    return this._process !== null && this._process.stdin?.writable === true;
+  private get _isBackendHealthy(): boolean {
+    if (!this._backend) return false;
+    return this._backend.isHealthy;
   }
 
   private _safeErrorCallback(error: Error): void {
@@ -148,10 +161,7 @@ export class AudioEncoder extends EventEmitter {
       throw new DOMException(`Codec '${config.codec}' is not supported`, 'NotSupportedError');
     }
 
-    if (this._process) {
-      this._process.kill();
-      this._process = null;
-    }
+    this._stopBackend();
 
     this._config = { ...config };
     this._state = 'configured';
@@ -161,7 +171,7 @@ export class AudioEncoder extends EventEmitter {
     this._bitstreamFormat = config.format ?? 'adts';
     this._codecDescription = null;
 
-    this._startFFmpeg();
+    this._startBackend();
   }
 
   encode(data: AudioData): void {
@@ -173,8 +183,8 @@ export class AudioEncoder extends EventEmitter {
       throw new TypeError('data must be an AudioData');
     }
 
-    if (!this._isProcessHealthy) {
-      this._safeErrorCallback(new Error('Encoder process is not healthy'));
+    if (!this._isBackendHealthy) {
+      this._safeErrorCallback(new Error('Encoder backend is not healthy'));
       return;
     }
 
@@ -182,9 +192,8 @@ export class AudioEncoder extends EventEmitter {
 
     const pcmData = this._audioDataToPCM(data);
 
-    try {
-      this._process!.stdin!.write(pcmData);
-    } catch {
+    const writeSuccess = this._backend!.write(pcmData);
+    if (!writeSuccess) {
       this._encodeQueueSize = Math.max(0, this._encodeQueueSize - 1);
       this._safeErrorCallback(new Error('Failed to write audio data to encoder'));
       return;
@@ -199,7 +208,7 @@ export class AudioEncoder extends EventEmitter {
     }
 
     return new Promise((resolve, reject) => {
-      if (!this._process) {
+      if (!this._backend) {
         resolve();
         return;
       }
@@ -222,9 +231,9 @@ export class AudioEncoder extends EventEmitter {
         this._frameCount = 0;
         this._firstChunk = true;
         this._accumulatedData = Buffer.alloc(0);
-        this._process = null;
+        this._backend = null;
         if (this._config) {
-          this._startFFmpeg();
+          this._startBackend();
         }
         resolve();
       };
@@ -240,9 +249,9 @@ export class AudioEncoder extends EventEmitter {
         doReject(new DOMException('Flush operation timed out', 'TimeoutError'));
       }, timeout);
 
-      this._process.once('close', doResolve);
-      this._process.once('error', doReject);
-      this._process.stdin?.end();
+      this._backend.once('close', doResolve);
+      this._backend.once('error', doReject);
+      this._backend.end();
     });
   }
 
@@ -251,7 +260,7 @@ export class AudioEncoder extends EventEmitter {
       throw new DOMException('Encoder is closed', 'InvalidStateError');
     }
 
-    this._stopFFmpeg();
+    this._stopBackend();
     this._state = 'unconfigured';
     this._config = null;
     this._encodeQueueSize = 0;
@@ -264,17 +273,69 @@ export class AudioEncoder extends EventEmitter {
   close(): void {
     if (this._state === 'closed') return;
 
-    this._stopFFmpeg();
+    this._stopBackend();
     this._state = 'closed';
     this._config = null;
     this._encodeQueueSize = 0;
     this._codecDescription = null;
   }
 
-  private _startFFmpeg(): void {
+  private _startBackend(): void {
     if (!this._config) return;
 
-    // Codec was already validated in configure(), so we can safely use a fallback here
+    const requestedBackend = this._config.backend ?? process.env.WEBCODECS_BACKEND ?? 'node-av';
+
+    // Use node-av for all codecs unless explicitly requesting ffmpeg
+    if (requestedBackend !== 'ffmpeg') {
+      try {
+        this._startNodeAvBackend();
+        this._backendName = 'node-av';
+        return;
+      } catch {
+        // Fall through to ffmpeg CLI
+      }
+    }
+
+    this._startFFmpegBackend();
+    this._backendName = 'ffmpeg';
+  }
+
+  private _startNodeAvBackend(): void {
+    if (!this._config) return;
+
+    this._ffmpegCodec = getAudioEncoderCodec(this._config.codec) || 'aac';
+
+    const encoder = new NodeAvAudioEncoder();
+    encoder.startEncoder({
+      codec: this._config.codec,
+      sampleRate: this._config.sampleRate,
+      numberOfChannels: this._config.numberOfChannels,
+      bitrate: this._config.bitrate,
+      bitrateMode: this._config.bitrateMode,
+      latencyMode: this._config.latencyMode,
+    });
+
+    encoder.on('encodedFrame', (frame: { data: Buffer; timestamp: number; keyFrame: boolean }) => {
+      this._handleEncodedFrame(frame);
+    });
+
+    encoder.on('error', (err: Error) => {
+      this._safeErrorCallback(err);
+    });
+
+    encoder.on('close', () => {
+      if (this._accumulatedData.length > 0) {
+        this._emitChunk(this._accumulatedData, 'key');
+        this._accumulatedData = Buffer.alloc(0);
+      }
+    });
+
+    this._backend = encoder;
+  }
+
+  private _startFFmpegBackend(): void {
+    if (!this._config) return;
+
     this._ffmpegCodec = getAudioEncoderCodec(this._config.codec) || 'aac';
     const format = getAudioEncoderFormat(this._ffmpegCodec);
 
@@ -309,35 +370,101 @@ export class AudioEncoder extends EventEmitter {
 
     args.push('-f', format, 'pipe:1');
 
-    this._process = spawn('ffmpeg', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const process = spawn('ffmpeg', args, { stdio: ['pipe', 'pipe', 'pipe'] });
 
-    this._process.stdout?.on('data', (data: Buffer) => {
+    process.stdout?.on('data', (data: Buffer) => {
       this._accumulatedData = Buffer.concat([this._accumulatedData, data]);
       this._parseEncodedFrames();
     });
 
-    this._process.stderr?.on('data', (data: Buffer) => {
+    process.stderr?.on('data', (data: Buffer) => {
       const msg = data.toString();
       if (!msg.includes('Discarding ID3')) {
         logger.warn('FFmpeg stderr', { message: msg });
       }
     });
 
-    this._process.on('close', () => {
+    process.on('close', () => {
       if (this._accumulatedData.length > 0) {
         this._emitChunk(this._accumulatedData, 'key');
         this._accumulatedData = Buffer.alloc(0);
       }
     });
 
-    this._process.stdin?.on('error', () => {});
+    process.stdin?.on('error', () => {});
+
+    // Wrap ChildProcess to match EncoderBackend interface
+    this._backend = {
+      write: (data: Buffer) => {
+        try {
+          process.stdin?.write(data);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      end: () => process.stdin?.end(),
+      kill: () => process.kill('SIGTERM'),
+      on: (event: string, handler: (...args: any[]) => void) => process.on(event, handler),
+      once: (event: string, handler: (...args: any[]) => void) => process.once(event, handler),
+      get isHealthy() {
+        return process.stdin?.writable === true;
+      },
+    };
   }
 
-  private _stopFFmpeg(): void {
-    if (this._process) {
-      this._process.kill('SIGTERM');
-      this._process = null;
+  private _stopBackend(): void {
+    if (this._backend) {
+      this._backend.kill();
+      this._backend = null;
     }
+  }
+
+  private _handleEncodedFrame(frame: { data: Buffer; timestamp: number; keyFrame: boolean }): void {
+    if (!this._config) return;
+
+    const samplesPerFrame = getAudioFrameSize(this._ffmpegCodec) || 1024;
+    const timestamp = (this._frameCount * 1_000_000) / this._config.sampleRate;
+    const duration = (samplesPerFrame * 1_000_000) / this._config.sampleRate;
+
+    let payload = frame.data;
+    const codecBase = this._config.codec.split('.')[0].toLowerCase();
+    const isAac = codecBase === 'mp4a' || codecBase === 'aac';
+
+    if (this._bitstreamFormat === 'aac' && isAac) {
+      const stripped = stripAdtsHeader(new Uint8Array(frame.data));
+      payload = Buffer.from(stripped);
+      if (!this._codecDescription) {
+        this._codecDescription = buildAudioSpecificConfig({
+          samplingRate: this._config.sampleRate,
+          channelConfiguration: this._config.numberOfChannels,
+        });
+      }
+    }
+
+    const chunk = new EncodedAudioChunk({
+      type: frame.keyFrame ? 'key' : 'delta',
+      timestamp,
+      duration,
+      data: new Uint8Array(payload),
+    });
+
+    this._encodeQueueSize = Math.max(0, this._encodeQueueSize - 1);
+    this.emit('dequeue');
+
+    const metadata: AudioEncoderOutputMetadata | undefined = this._firstChunk
+      ? {
+          decoderConfig: {
+            codec: this._config.codec,
+            sampleRate: this._config.sampleRate,
+            numberOfChannels: this._config.numberOfChannels,
+            description: this._codecDescription ?? undefined,
+          },
+        }
+      : undefined;
+
+    this._firstChunk = false;
+    this._safeOutputCallback(chunk, metadata);
   }
 
   private _audioDataToPCM(data: AudioData): Buffer {
@@ -375,7 +502,7 @@ export class AudioEncoder extends EventEmitter {
     const minChunkSize = 64;
 
     while (this._accumulatedData.length >= minChunkSize) {
-      let frameEnd = this._findFrameEnd();
+      const frameEnd = this._findFrameEnd();
 
       if (frameEnd > 0) {
         const frameData = Buffer.from(this._accumulatedData.subarray(0, frameEnd));

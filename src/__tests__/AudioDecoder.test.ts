@@ -432,7 +432,7 @@ describe('AudioDecoder encode-decode roundtrip', () => {
   it('should decode FLAC encoded audio', async () => {
     const sampleRate = 48000;
     const numberOfChannels = 2;
-    const numberOfFrames = 1024;
+    const numberOfFrames = 4608; // FLAC minimum frame size
     const chunkCount = 2;
 
     // Step 1: Encode audio
@@ -510,9 +510,9 @@ describe('AudioDecoder encode-decode roundtrip', () => {
   }, 30000);
 
   it('should handle mono audio', async () => {
-    const sampleRate = 44100;
+    const sampleRate = 48000; // libopus only supports specific rates: 48000, 24000, 16000, 12000, 8000
     const numberOfChannels = 1;
-    const numberOfFrames = 1024;
+    const numberOfFrames = 960; // Opus frame size
 
     // Encode
     const encodedChunks: EncodedAudioChunk[] = [];

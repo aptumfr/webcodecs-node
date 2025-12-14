@@ -18,6 +18,7 @@ import {
 } from '../ffmpeg/audio-codecs.js';
 import type { AacConfig } from '../utils/aac.js';
 import { parseAudioSpecificConfig, wrapAacFrameWithAdts } from '../utils/aac.js';
+import { NodeAvAudioDecoder } from '../node-av/NodeAvAudioDecoder.js';
 
 const logger = createLogger('AudioDecoder');
 
@@ -29,6 +30,7 @@ export interface AudioDecoderConfig {
   numberOfChannels: number;
   description?: ArrayBuffer | ArrayBufferView;
   outputFormat?: AudioSampleFormat;
+  backend?: 'node-av' | 'ffmpeg';
 }
 
 export interface AudioDecoderInit {
@@ -43,13 +45,23 @@ export interface AudioDecoderSupport {
 
 const DEFAULT_FLUSH_TIMEOUT = 30000;
 
+interface DecoderBackend {
+  write(data: Buffer): boolean;
+  end(): void;
+  kill(): void;
+  on(event: string, handler: (...args: any[]) => void): void;
+  once(event: string, handler: (...args: any[]) => void): void;
+  isHealthy: boolean;
+}
+
 export class AudioDecoder extends EventEmitter {
   private _state: CodecState = 'unconfigured';
   private _decodeQueueSize = 0;
   private _config: AudioDecoderConfig | null = null;
   private _outputCallback: (data: AudioData) => void;
   private _errorCallback: (error: Error) => void;
-  private _process: ChildProcess | null = null;
+  private _backend: DecoderBackend | null = null;
+  private _backendName: 'node-av' | 'ffmpeg' = 'node-av';
   private _accumulatedData: Buffer = Buffer.alloc(0);
   private _frameIndex = 0;
   private _resolveFlush: (() => void) | null = null;
@@ -73,8 +85,9 @@ export class AudioDecoder extends EventEmitter {
   get state(): CodecState { return this._state; }
   get decodeQueueSize(): number { return this._decodeQueueSize; }
 
-  private get _isProcessHealthy(): boolean {
-    return this._process !== null && this._process.stdin?.writable === true;
+  private get _isBackendHealthy(): boolean {
+    if (!this._backend) return false;
+    return this._backend.isHealthy;
   }
 
   private _safeErrorCallback(error: Error): void {
@@ -131,10 +144,7 @@ export class AudioDecoder extends EventEmitter {
       throw new TypeError(`Invalid outputFormat: ${config.outputFormat}`);
     }
 
-    if (this._process) {
-      this._process.kill();
-      this._process = null;
-    }
+    this._stopBackend();
 
     this._config = { ...config };
     this._outputFormat = config.outputFormat ?? 'f32';
@@ -143,7 +153,7 @@ export class AudioDecoder extends EventEmitter {
     this._accumulatedData = Buffer.alloc(0);
     this._aacConfig = this._parseAacDescription(config);
 
-    this._startFFmpeg();
+    this._startBackend();
   }
 
   decode(chunk: EncodedAudioChunk): void {
@@ -155,20 +165,16 @@ export class AudioDecoder extends EventEmitter {
       throw new TypeError('chunk must be an EncodedAudioChunk');
     }
 
-    if (!this._isProcessHealthy) {
-      this._safeErrorCallback(new Error('Decoder process is not healthy'));
+    if (!this._isBackendHealthy) {
+      this._safeErrorCallback(new Error('Decoder backend is not healthy'));
       return;
     }
 
     this._decodeQueueSize++;
 
     try {
-      let dataToWrite: Buffer | Uint8Array = chunk._rawData;
-      if (this._aacConfig) {
-        dataToWrite = wrapAacFrameWithAdts(chunk._rawData, this._aacConfig);
-      }
-      const bufferData = Buffer.isBuffer(dataToWrite) ? dataToWrite : Buffer.from(dataToWrite);
-      this._process!.stdin!.write(bufferData);
+      const bufferData = Buffer.from(chunk._rawData);
+      this._backend!.write(bufferData);
     } catch {
       this._decodeQueueSize = Math.max(0, this._decodeQueueSize - 1);
       this._safeErrorCallback(new Error('Failed to write chunk data to decoder'));
@@ -181,7 +187,7 @@ export class AudioDecoder extends EventEmitter {
     }
 
     return new Promise((resolve, reject) => {
-      if (!this._process) {
+      if (!this._backend) {
         resolve();
         return;
       }
@@ -201,6 +207,13 @@ export class AudioDecoder extends EventEmitter {
         if (resolved) return;
         resolved = true;
         cleanup();
+        this._decodeQueueSize = 0;
+        this._frameIndex = 0;
+        this._accumulatedData = Buffer.alloc(0);
+        this._backend = null;
+        if (this._config) {
+          this._startBackend();
+        }
         resolve();
       };
 
@@ -215,9 +228,9 @@ export class AudioDecoder extends EventEmitter {
         doReject(new DOMException('Flush operation timed out', 'TimeoutError'));
       }, timeout);
 
-      this._resolveFlush = doResolve;
-      this._process.once('error', doReject);
-      this._process.stdin?.end();
+      this._backend.once('close', doResolve);
+      this._backend.once('error', doReject);
+      this._backend.end();
     });
   }
 
@@ -226,7 +239,7 @@ export class AudioDecoder extends EventEmitter {
       throw new DOMException('Decoder is closed', 'InvalidStateError');
     }
 
-    this._stopFFmpeg();
+    this._stopBackend();
     this._state = 'unconfigured';
     this._config = null;
     this._decodeQueueSize = 0;
@@ -238,14 +251,64 @@ export class AudioDecoder extends EventEmitter {
   close(): void {
     if (this._state === 'closed') return;
 
-    this._stopFFmpeg();
+    this._stopBackend();
     this._state = 'closed';
     this._config = null;
     this._decodeQueueSize = 0;
     this._aacConfig = null;
   }
 
-  private _startFFmpeg(): void {
+  private _startBackend(): void {
+    if (!this._config) return;
+
+    const requestedBackend = this._config.backend ?? process.env.WEBCODECS_BACKEND ?? 'node-av';
+
+    // Use node-av for all codecs unless explicitly requesting ffmpeg
+    if (requestedBackend !== 'ffmpeg') {
+      try {
+        this._startNodeAvBackend();
+        this._backendName = 'node-av';
+        return;
+      } catch {
+        // Fall through to ffmpeg CLI
+      }
+    }
+
+    this._startFFmpegBackend();
+    this._backendName = 'ffmpeg';
+  }
+
+  private _startNodeAvBackend(): void {
+    if (!this._config) return;
+
+    const decoder = new NodeAvAudioDecoder();
+    decoder.startDecoder({
+      codec: this._config.codec,
+      sampleRate: this._config.sampleRate,
+      numberOfChannels: this._config.numberOfChannels,
+      description: this._config.description,
+      outputFormat: this._outputFormat,
+    });
+
+    decoder.on('frame', (frame: { data: Buffer; numberOfFrames: number; timestamp: number }) => {
+      this._handleDecodedFrame(frame);
+    });
+
+    decoder.on('error', (err: Error) => {
+      this._safeErrorCallback(err);
+    });
+
+    decoder.on('close', () => {
+      if (this._accumulatedData.length > 0) {
+        this._emitAudioData(this._accumulatedData);
+        this._accumulatedData = Buffer.alloc(0);
+      }
+    });
+
+    this._backend = decoder;
+  }
+
+  private _startFFmpegBackend(): void {
     if (!this._config) return;
 
     const codecInfo = getAudioDecoderInfo(this._config.codec);
@@ -266,21 +329,21 @@ export class AudioDecoder extends EventEmitter {
 
     args.push('pipe:1');
 
-    this._process = spawn('ffmpeg', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const process = spawn('ffmpeg', args, { stdio: ['pipe', 'pipe', 'pipe'] });
 
-    this._process.stdout?.on('data', (data: Buffer) => {
+    process.stdout?.on('data', (data: Buffer) => {
       this._accumulatedData = Buffer.concat([this._accumulatedData, data]);
       this._emitDecodedFrames();
     });
 
-    this._process.stderr?.on('data', (data: Buffer) => {
+    process.stderr?.on('data', (data: Buffer) => {
       const msg = data.toString();
       if (!msg.includes('Discarding') && !msg.includes('invalid')) {
         logger.warn('FFmpeg stderr', { message: msg });
       }
     });
 
-    this._process.on('close', () => {
+    process.on('close', () => {
       if (this._accumulatedData.length > 0) {
         this._emitAudioData(this._accumulatedData);
         this._accumulatedData = Buffer.alloc(0);
@@ -295,19 +358,71 @@ export class AudioDecoder extends EventEmitter {
       }
 
       if (wasFlushing && this._state === 'configured' && this._config) {
-        this._process = null;
-        this._startFFmpeg();
+        this._backend = null;
+        this._startBackend();
       }
     });
 
-    this._process.stdin?.on('error', () => {});
+    process.stdin?.on('error', () => {});
+
+    // Wrap ChildProcess to match DecoderBackend interface
+    this._backend = {
+      write: (data: Buffer) => {
+        try {
+          let dataToWrite: Buffer | Uint8Array = data;
+          if (this._aacConfig) {
+            dataToWrite = Buffer.from(wrapAacFrameWithAdts(new Uint8Array(data), this._aacConfig));
+          }
+          process.stdin!.write(dataToWrite);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      end: () => {
+        process.stdin?.end();
+      },
+      kill: () => {
+        process.kill('SIGTERM');
+      },
+      on: (event: string, handler: (...args: any[]) => void) => {
+        process.on(event, handler);
+      },
+      once: (event: string, handler: (...args: any[]) => void) => {
+        process.once(event, handler);
+      },
+      get isHealthy() {
+        return process.stdin?.writable === true;
+      },
+    };
   }
 
-  private _stopFFmpeg(): void {
-    if (this._process) {
-      this._process.kill('SIGTERM');
-      this._process = null;
+  private _stopBackend(): void {
+    if (this._backend) {
+      this._backend.kill();
+      this._backend = null;
     }
+  }
+
+  private _handleDecodedFrame(frame: { data: Buffer; numberOfFrames: number; timestamp: number }): void {
+    if (!this._config) return;
+
+    const timestamp = (this._frameIndex * 1_000_000) / this._config.sampleRate;
+
+    const audioData = new AudioData({
+      format: this._outputFormat,
+      sampleRate: this._config.sampleRate,
+      numberOfChannels: this._config.numberOfChannels,
+      numberOfFrames: frame.numberOfFrames,
+      timestamp,
+      data: new Uint8Array(frame.data),
+    });
+
+    this._frameIndex += frame.numberOfFrames;
+    this._decodeQueueSize = Math.max(0, this._decodeQueueSize - 1);
+    this.emit('dequeue');
+
+    this._safeOutputCallback(audioData);
   }
 
   private _parseAacDescription(config: AudioDecoderConfig): AacConfig | null {
@@ -376,7 +491,7 @@ export class AudioDecoder extends EventEmitter {
 
     let outputData: Uint8Array;
     if (outputInfo.isPlanar) {
-      outputData = this._convertToplanar(data, numberOfFrames, bytesPerSample);
+      outputData = this._convertToPlanar(data, numberOfFrames, bytesPerSample);
     } else {
       outputData = new Uint8Array(data);
     }
@@ -399,7 +514,7 @@ export class AudioDecoder extends EventEmitter {
     this._safeOutputCallback(audioData);
   }
 
-  private _convertToplanar(data: Buffer, numberOfFrames: number, bytesPerSample: number): Uint8Array {
+  private _convertToPlanar(data: Buffer, numberOfFrames: number, bytesPerSample: number): Uint8Array {
     if (!this._config) return new Uint8Array(data);
 
     const numChannels = this._config.numberOfChannels;

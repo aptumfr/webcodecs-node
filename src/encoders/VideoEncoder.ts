@@ -371,10 +371,9 @@ export class VideoEncoder extends EventEmitter {
 
   private _createEncoderProcess(pixelFormat: string): FFmpegProcess | NodeAvVideoEncoder {
     const requestedBackend = this._config?.backend ?? process.env.WEBCODECS_BACKEND ?? 'node-av';
-    const codecBase = this._config?.codec?.split('.')[0].toLowerCase();
-    const vpCodec = codecBase === 'vp8' || codecBase === 'vp9' || codecBase === 'vp09';
 
-    if (requestedBackend !== 'ffmpeg' && !vpCodec && this._canUseNodeAv(pixelFormat)) {
+    // Use node-av for all codecs unless explicitly requesting ffmpeg
+    if (requestedBackend !== 'ffmpeg' && this._canUseNodeAv(pixelFormat)) {
       try {
         return new NodeAvVideoEncoder();
       } catch {

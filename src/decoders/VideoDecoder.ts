@@ -9,6 +9,7 @@ import { VideoFrame } from '../core/VideoFrame.js';
 import type { VideoPixelFormat } from '../core/VideoFrame.js';
 import { EncodedVideoChunk } from '../core/EncodedVideoChunk.js';
 import { FFmpegProcess } from '../FFmpegProcess.js';
+import { NodeAvVideoDecoder } from '../node-av/NodeAvVideoDecoder.js';
 import { DOMException } from '../types/index.js';
 import type { VideoColorSpaceInit } from '../formats/index.js';
 import { isVideoCodecBaseSupported } from '../capabilities/index.js';
@@ -41,6 +42,8 @@ export interface VideoDecoderConfig {
   hardwareAcceleration?: 'no-preference' | 'prefer-hardware' | 'prefer-software';
   optimizeForLatency?: boolean;
   outputFormat?: VideoPixelFormat;
+  /** Backend selection: defaults to node-av, falls back to ffmpeg CLI */
+  backend?: 'node-av' | 'ffmpeg';
 }
 
 export interface VideoDecoderInit {
@@ -61,7 +64,7 @@ export class VideoDecoder extends EventEmitter {
   private _config: VideoDecoderConfig | null = null;
   private _outputCallback: (frame: VideoFrame) => void;
   private _errorCallback: (error: Error) => void;
-  private _ffmpeg: FFmpegProcess | null = null;
+  private _ffmpeg: FFmpegProcess | NodeAvVideoDecoder | null = null;
   private _frameTimestamp = 0;
   private _frameDuration = 0;
   private _pendingChunks: { timestamp: number; duration: number | null }[] = [];
@@ -77,6 +80,7 @@ export class VideoDecoder extends EventEmitter {
     hwaccel: HardwareAccelerationMethod | null;
     isHardware: boolean;
   } | null = null;
+  private _backendName: 'node-av' | 'ffmpeg' = 'node-av';
 
   constructor(init: VideoDecoderInit) {
     super();
@@ -162,13 +166,14 @@ export class VideoDecoder extends EventEmitter {
     this._hevcConfig = this._parseHevcDescription(config);
     this._hardwarePreference = config.hardwareAcceleration ?? 'no-preference';
     this._hardwareDecoderSelection = null;
+    this._backendName = 'node-av';
 
     if (this._hardwarePreference === 'prefer-hardware') {
       this._hardwareDecoderSelection = this._selectHardwareDecoder(config.codec);
     }
 
     if (config.codedWidth && config.codedHeight) {
-      this._startFFmpeg();
+      this._startDecoder();
     }
   }
 
@@ -256,7 +261,7 @@ export class VideoDecoder extends EventEmitter {
         this._ivfHeaderSent = false;
         this._ffmpeg = null;
         if (this._config?.codedWidth && this._config?.codedHeight) {
-          this._startFFmpeg();
+          this._startDecoder();
         }
         resolve();
       };
@@ -304,27 +309,43 @@ export class VideoDecoder extends EventEmitter {
     this._hevcConfig = null;
   }
 
-  private _startFFmpeg(): void {
+  private _startDecoder(): void {
     if (!this._config?.codedWidth || !this._config?.codedHeight) return;
 
     const codecBase = this._config.codec.split('.')[0].toLowerCase();
-    this._useIvf = ['vp8', 'vp9', 'vp09', 'av01', 'av1'].includes(codecBase);
+    this._useIvf = false;
     this._ivfHeaderSent = false;
     this._frameIndex = 0;
 
-    this._ffmpeg = new FFmpegProcess();
+    this._ffmpeg = this._createDecoderProcess();
 
     const ffmpegPixFmt = pixelFormatToFFmpeg(this._outputFormat);
     const hardwareOptions = this._getHardwareDecoderArgs(ffmpegPixFmt);
 
-    this._ffmpeg.startDecoder({
-      codec: this._config.codec,
-      width: this._config.codedWidth,
-      height: this._config.codedHeight,
-      outputPixelFormat: ffmpegPixFmt,
-      hardwareDecoderArgs: hardwareOptions.args ?? undefined,
-      hardwareDownloadFilter: hardwareOptions.filter ?? undefined,
-    });
+    if (this._ffmpeg instanceof NodeAvVideoDecoder) {
+      this._backendName = 'node-av';
+      const description = this._getDescriptionBuffer();
+      this._ffmpeg.startDecoder({
+        codec: this._config.codec,
+        width: this._config.codedWidth,
+        height: this._config.codedHeight,
+        framerate: this._config.optimizeForLatency ? 60 : 30,
+        outputPixelFormat: ffmpegPixFmt,
+        description: description ?? undefined,
+        hardwareAcceleration: this._hardwarePreference,
+      });
+    } else {
+      this._backendName = 'ffmpeg';
+      this._useIvf = ['vp8', 'vp9', 'vp09', 'av01', 'av1'].includes(codecBase);
+      this._ffmpeg.startDecoder({
+        codec: this._config.codec,
+        width: this._config.codedWidth,
+        height: this._config.codedHeight,
+        outputPixelFormat: ffmpegPixFmt,
+        hardwareDecoderArgs: hardwareOptions.args ?? undefined,
+        hardwareDownloadFilter: hardwareOptions.filter ?? undefined,
+      });
+    }
 
     this._ffmpeg.on('frame', (data: Buffer) => {
       this._handleDecodedFrame(data);
@@ -340,6 +361,18 @@ export class VideoDecoder extends EventEmitter {
       this._ffmpeg.kill();
       this._ffmpeg = null;
     }
+  }
+
+  private _createDecoderProcess(): FFmpegProcess | NodeAvVideoDecoder {
+    const requestedBackend = this._config?.backend ?? process.env.WEBCODECS_BACKEND ?? 'node-av';
+    if (requestedBackend !== 'ffmpeg') {
+      try {
+        return new NodeAvVideoDecoder();
+      } catch {
+        // Fall back
+      }
+    }
+    return new FFmpegProcess();
   }
 
   private _selectHardwareDecoder(codec: string): {
@@ -422,6 +455,26 @@ export class VideoDecoder extends EventEmitter {
     } catch {
       return null;
     }
+  }
+
+  private _getDescriptionBuffer(): Uint8Array | null {
+    if (!this._config?.description) {
+      return null;
+    }
+
+    if (this._config.description instanceof ArrayBuffer) {
+      return new Uint8Array(this._config.description);
+    }
+
+    if (ArrayBuffer.isView(this._config.description)) {
+      return new Uint8Array(
+        this._config.description.buffer,
+        this._config.description.byteOffset,
+        this._config.description.byteLength
+      );
+    }
+
+    return null;
   }
 
   private _getHardwareDecoderArgs(ffmpegPixFmt: string): { args: string[] | null; filter: string | null } {
