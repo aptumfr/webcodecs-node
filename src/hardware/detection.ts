@@ -2,10 +2,10 @@
  * Hardware acceleration detection
  *
  * Detects available hardware acceleration methods, encoders, and decoders
- * by querying FFmpeg capabilities.
+ * using node-av native bindings for better performance.
  */
 
-import { execSync } from 'child_process';
+import { HardwareContext } from 'node-av/api';
 import { createLogger } from '../utils/logger.js';
 import type {
   HardwareAccelerationMethod,
@@ -18,23 +18,25 @@ const logger = createLogger('HardwareAcceleration');
 // Cached capabilities
 let cachedCapabilities: HardwareCapabilities | null = null;
 
+// Map node-av device types to our HardwareAccelerationMethod
+const DEVICE_TYPE_MAP: Record<string, HardwareAccelerationMethod> = {
+  'vaapi': 'vaapi',
+  'cuda': 'cuda',
+  'qsv': 'qsv',
+  'videotoolbox': 'videotoolbox',
+  'drm': 'drm',
+  'v4l2m2m': 'v4l2m2m',
+};
+
 function collectHwaccels(): HardwareAccelerationMethod[] {
   try {
-    const output = execSync('ffmpeg -hwaccels 2>&1', { encoding: 'utf8' });
-    const lines = output.split('\n');
+    const available = HardwareContext.listAvailable();
     const methods: HardwareAccelerationMethod[] = [];
 
-    let startParsing = false;
-    for (const line of lines) {
-      if (line.includes('Hardware acceleration methods:')) {
-        startParsing = true;
-        continue;
-      }
-      if (startParsing && line.trim()) {
-        const method = line.trim() as HardwareAccelerationMethod;
-        if (['vaapi', 'cuda', 'qsv', 'videotoolbox', 'drm', 'v4l2m2m'].includes(method)) {
-          methods.push(method);
-        }
+    for (const deviceType of available) {
+      const mapped = DEVICE_TYPE_MAP[deviceType];
+      if (mapped) {
+        methods.push(mapped);
       }
     }
 
@@ -46,37 +48,65 @@ function collectHwaccels(): HardwareAccelerationMethod[] {
 
 function collectEncoders(): string[] {
   try {
-    const output = execSync('ffmpeg -encoders 2>&1', { encoding: 'utf8' });
     const encoders: string[] = [];
+    const hw = HardwareContext.auto();
 
-    for (const line of output.split('\n')) {
-      const match = line.match(/^\s*V[.\w]+\s+(\S+)/);
-      if (match) {
-        encoders.push(match[1]);
+    if (hw) {
+      const supportedCodecs = hw.findSupportedCodecs();
+      // Filter for encoder codecs (typically ending with the hwaccel suffix)
+      for (const codec of supportedCodecs) {
+        encoders.push(codec);
+      }
+      hw.dispose();
+    }
+
+    // Also include standard software encoders
+    const softwareEncoders = [
+      'libx264', 'libx265', 'libvpx', 'libvpx-vp9',
+      'libaom-av1', 'libsvtav1', 'aac', 'libopus',
+    ];
+    for (const enc of softwareEncoders) {
+      if (!encoders.includes(enc)) {
+        encoders.push(enc);
       }
     }
 
     return encoders;
   } catch {
-    return [];
+    // Return software encoders as fallback
+    return ['libx264', 'libx265', 'libvpx', 'libvpx-vp9', 'libaom-av1'];
   }
 }
 
 function collectDecoders(): string[] {
   try {
-    const output = execSync('ffmpeg -decoders 2>&1', { encoding: 'utf8' });
     const decoders: string[] = [];
+    const hw = HardwareContext.auto();
 
-    for (const line of output.split('\n')) {
-      const match = line.match(/^\s*V[.\w]+\s+(\S+)/);
-      if (match) {
-        decoders.push(match[1]);
+    if (hw) {
+      const supportedCodecs = hw.findSupportedCodecs();
+      // Hardware decoders from node-av
+      for (const codec of supportedCodecs) {
+        decoders.push(codec);
+      }
+      hw.dispose();
+    }
+
+    // Also include standard software decoders
+    const softwareDecoders = [
+      'h264', 'hevc', 'vp8', 'vp9', 'av1',
+      'aac', 'opus', 'mp3', 'flac',
+    ];
+    for (const dec of softwareDecoders) {
+      if (!decoders.includes(dec)) {
+        decoders.push(dec);
       }
     }
 
     return decoders;
   } catch {
-    return [];
+    // Return software decoders as fallback
+    return ['h264', 'hevc', 'vp8', 'vp9', 'av1'];
   }
 }
 

@@ -9,6 +9,7 @@ import { DOMException } from '../types/index.js';
 import { createLogger } from '../utils/index.js';
 import { parseWebPHeader } from '../formats/index.js';
 import type { VideoColorSpaceInit } from '../formats/index.js';
+import { NodeAvImageDecoder, probeImageDimensions } from '../node-av/NodeAvImageDecoder.js';
 
 const logger = createLogger('ImageDecoder');
 
@@ -600,8 +601,57 @@ export class ImageDecoder {
     return { data: transformed, width: newWidth, height: newHeight };
   }
 
+  private async _decodeWithNodeAv(): Promise<void> {
+    if (!this._data) return;
+
+    logger.debug('Using node-av backend for image decoding');
+    const nodeAvDecoder = new NodeAvImageDecoder({
+      mimeType: this._type,
+      data: this._data,
+      desiredWidth: this._desiredWidth,
+      desiredHeight: this._desiredHeight,
+      colorSpace: this._preferredColorSpace,
+    });
+
+    try {
+      const decodedFrames = await nodeAvDecoder.decode();
+
+      for (const frame of decodedFrames) {
+        // Apply premultiplication if needed
+        const processed = this._processFrameData(frame.data);
+        // Apply orientation correction for JPEG
+        const oriented = this._applyOrientation(processed, frame.width, frame.height);
+
+        this._frames.push({
+          data: oriented.data,
+          width: oriented.width,
+          height: oriented.height,
+          timestamp: frame.timestamp,
+          duration: frame.duration,
+          complete: frame.complete,
+          colorSpace: frame.colorSpace,
+        });
+      }
+    } finally {
+      nodeAvDecoder.close();
+    }
+  }
+
   private async _decodeAllFramesDirect(): Promise<void> {
     if (!this._data) return;
+
+    // Try node-av first for non-animated formats
+    const isAnimatedFormat = ['image/gif', 'image/apng', 'image/webp'].includes(this._type.toLowerCase());
+    if (!isAnimatedFormat && NodeAvImageDecoder.isTypeSupported(this._type)) {
+      try {
+        await this._decodeWithNodeAv();
+        if (this._frames.length > 0) {
+          return;
+        }
+      } catch (err) {
+        logger.warn('node-av decode failed, falling back to FFmpeg', { error: err });
+      }
+    }
 
     const codecInfo = MIME_TO_CODEC[this._type.toLowerCase()];
     const dimensions = await this._probeDimensions();
@@ -712,6 +762,18 @@ export class ImageDecoder {
       const webpInfo = parseWebPHeader(this._data);
       if (webpInfo && webpInfo.width > 0 && webpInfo.height > 0) {
         return { width: webpInfo.width, height: webpInfo.height };
+      }
+    }
+
+    // Try node-av probing first
+    if (NodeAvImageDecoder.isTypeSupported(this._type)) {
+      try {
+        const dims = await probeImageDimensions(this._data, this._type);
+        if (dims.width > 0 && dims.height > 0) {
+          return dims;
+        }
+      } catch {
+        // Fall through to FFmpeg probing
       }
     }
 

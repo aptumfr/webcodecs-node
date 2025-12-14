@@ -168,7 +168,7 @@ async function main() {
     codedWidth: 640,
     codedHeight: 360,
     outputFormat: 'RGBA',
-    hardwareAcceleration: 'prefer-software',
+    hardwareAcceleration: 'prefer-hardware',
   });
 
   let timestampUs = 0;
@@ -209,8 +209,7 @@ async function main() {
     framerate: FRAME_RATE,
     bitrate: 4_000_000,
     latencyMode: 'realtime',
-    hardwareAcceleration: 'prefer-software',
-    backend: 'ffmpeg',
+    hardwareAcceleration: 'prefer-hardware',
   });
 
   for (let i = 0; i < Math.min(decodedFrames.length, FRAMES_TO_RENDER); i++) {

@@ -25,6 +25,7 @@ import {
 
 import type { DecoderConfig } from '../ffmpeg/types.js';
 import { parseCodecString } from '../hardware/index.js';
+import { selectBestFilterChain, getNextFilterChain, describePipeline } from './HardwarePipeline.js';
 
 type DecoderOptions = DecoderConfig & {
   description?: Buffer | Uint8Array;
@@ -222,32 +223,80 @@ export class NodeAvVideoDecoder extends EventEmitter {
       return frame.toBuffer();
     }
 
-    const needsDownload = isHardwareFrame ? 'hwdownload,' : '';
-    const description = `${needsDownload}format=${outputFormatName}`;
+    // Try to process with current or new filter chain
+    // If it fails, automatically try the next chain in the fallback sequence
+    let attempts = 0;
+    const maxAttempts = 10; // Prevent infinite loops
 
-    if (!this.filter || this.filterDescription !== description) {
-      this.filter?.close();
-      // Use type assertion for FilterAPI options which may have additional properties
-      this.filter = FilterAPI.create(description, {
-        hardware: this.hardware ?? undefined,
-      } as any);
-      this.filterDescription = description;
+    while (attempts < maxAttempts) {
+      attempts++;
+
+      // Get filter chain (either current or select new one)
+      let description: string;
+      if (!this.filter || this.filterDescription === null) {
+        description = selectBestFilterChain(this.hardware, outputFormatName, isHardwareFrame);
+      } else {
+        description = this.filterDescription;
+      }
+
+      // Create filter if needed
+      if (!this.filter || this.filterDescription !== description) {
+        this.filter?.close();
+
+        // Log the selected pipeline
+        const hwType = this.hardware?.deviceTypeName ?? 'software';
+        console.log(`[NodeAvVideoDecoder] Pipeline: ${describePipeline(description, hwType)}`);
+
+        try {
+          this.filter = FilterAPI.create(description, {
+            hardware: this.hardware ?? undefined,
+          } as any);
+          this.filterDescription = description;
+        } catch (err) {
+          // Filter creation failed, try next chain
+          console.log(`[NodeAvVideoDecoder] Filter creation failed, trying next chain...`);
+          this.filter = null;
+          this.filterDescription = null;
+          const nextChain = getNextFilterChain(this.hardware, outputFormatName, isHardwareFrame);
+          if (!nextChain) {
+            throw err; // No more chains to try
+          }
+          continue;
+        }
+      }
+
+      // Try to process the frame
+      try {
+        await this.filter.process(frame);
+
+        // Drain a single frame from the filter
+        let filtered = await this.filter.receive();
+        while (filtered === null) {
+          filtered = await this.filter.receive();
+        }
+        if (!filtered) {
+          return null;
+        }
+
+        const buffer = filtered.toBuffer();
+        filtered.unref();
+        return buffer;
+      } catch (err) {
+        // Processing failed - close filter and try next chain
+        console.log(`[NodeAvVideoDecoder] Filter processing failed: ${err instanceof Error ? err.message : err}`);
+        this.filter?.close();
+        this.filter = null;
+        this.filterDescription = null;
+
+        const nextChain = getNextFilterChain(this.hardware, outputFormatName, isHardwareFrame);
+        if (!nextChain) {
+          throw err; // No more chains to try
+        }
+        // Loop will continue with next chain
+      }
     }
 
-    await this.filter.process(frame);
-
-    // Drain a single frame from the filter
-    let filtered = await this.filter.receive();
-    while (filtered === null) {
-      filtered = await this.filter.receive();
-    }
-    if (!filtered) {
-      return null;
-    }
-
-    const buffer = filtered.toBuffer();
-    filtered.unref();
-    return buffer;
+    throw new Error(`Failed to find working filter chain after ${maxAttempts} attempts`);
   }
 
   private async finish(): Promise<void> {
