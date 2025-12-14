@@ -1,3 +1,10 @@
+/**
+ * NodeAvAudioEncoder - Audio encoder using node-av native bindings
+ *
+ * Implements the AudioEncoderBackend interface for encoding audio samples
+ * using FFmpeg's libav* libraries via node-av.
+ */
+
 import { EventEmitter } from 'events';
 
 import { Encoder } from 'node-av/api';
@@ -17,26 +24,24 @@ import {
   type FFEncoderCodec,
 } from 'node-av/constants';
 
-import type { AudioSampleFormat } from '../types/audio.js';
+import type {
+  AudioEncoderBackend,
+  AudioEncoderBackendConfig,
+  EncodedFrame,
+} from '../backends/types.js';
+import { createLogger } from '../utils/logger.js';
 
-interface AudioEncoderConfig {
-  codec: string;
-  sampleRate: number;
-  numberOfChannels: number;
-  bitrate?: number;
-  bitrateMode?: 'constant' | 'variable';
-  latencyMode?: 'quality' | 'realtime';
-}
+const logger = createLogger('NodeAvAudioEncoder');
+
+/** Default sample rate for Opus codec */
+const OPUS_SAMPLE_RATE = 48000;
 
 /**
- * NodeAV-backed audio encoder.
- *
- * Mirrors the FFmpeg spawn-based audio encoder surface so it can be swapped
- * without touching callers.
+ * NodeAV-backed audio encoder implementing AudioEncoderBackend interface
  */
-export class NodeAvAudioEncoder extends EventEmitter {
+export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBackend {
   private encoder: Encoder | null = null;
-  private config: AudioEncoderConfig | null = null;
+  private config: AudioEncoderBackendConfig | null = null;
   private frameIndex = 0;
   private queue: Buffer[] = [];
   private processing = false;
@@ -44,26 +49,19 @@ export class NodeAvAudioEncoder extends EventEmitter {
   private shuttingDown = false;
   private sampleFormat: AVSampleFormat = AV_SAMPLE_FMT_FLT;
   private encoderSampleFormat: AVSampleFormat = AV_SAMPLE_FMT_FLTP;
-  private timeBase: Rational = new Rational(1, 48000);
+  private timeBase: Rational = new Rational(1, OPUS_SAMPLE_RATE);
 
   get isHealthy(): boolean {
     return !this.shuttingDown;
   }
 
-  /**
-   * Start the audio encoder with given configuration.
-   */
-  startEncoder(config: AudioEncoderConfig): void {
+  startEncoder(config: AudioEncoderBackendConfig): void {
     this.config = { ...config };
     this.timeBase = new Rational(1, config.sampleRate);
     // Input is always float32 interleaved from AudioData conversion
     this.sampleFormat = AV_SAMPLE_FMT_FLT;
   }
 
-  /**
-   * Write PCM audio data to the encoder.
-   * Data is expected to be f32le interleaved format.
-   */
   write(data: Buffer | Uint8Array): boolean {
     if (!this.config || this.shuttingDown) {
       return false;
@@ -74,27 +72,18 @@ export class NodeAvAudioEncoder extends EventEmitter {
     return true;
   }
 
-  /**
-   * Signal end-of-stream; flush remaining packets and emit 'close'.
-   */
   end(): void {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
     void this.finish().catch((err) => this.emit('error', err));
   }
 
-  /**
-   * Stop immediately.
-   */
   kill(): void {
     this.shuttingDown = true;
     this.cleanup();
     this.emit('close', null);
   }
 
-  /**
-   * Graceful shutdown with timeout compatibility.
-   */
   async shutdown(): Promise<void> {
     this.end();
   }
@@ -135,7 +124,7 @@ export class NodeAvAudioEncoder extends EventEmitter {
     // Store the encoder's required sample format
     this.encoderSampleFormat = options.sampleFormat;
 
-    console.log(`[NodeAvAudioEncoder] Using encoder: ${encoderCodec}, format: ${options.sampleFormat}`);
+    logger.info(`Using encoder: ${encoderCodec}, format: ${options.sampleFormat}`);
 
     this.encoder = await Encoder.create(encoderCodec as FFEncoderCodec, options);
   }
@@ -207,7 +196,7 @@ export class NodeAvAudioEncoder extends EventEmitter {
 
     return {
       type: 'audio' as const,
-      sampleRate: isOpus ? 48000 : this.config.sampleRate, // libopus requires 48000
+      sampleRate: isOpus ? OPUS_SAMPLE_RATE : this.config.sampleRate,
       channelLayout: this.getChannelLayout(this.config.numberOfChannels),
       sampleFormat,
       timeBase: this.timeBase,
@@ -301,9 +290,6 @@ export class NodeAvAudioEncoder extends EventEmitter {
     this.frameIndex += samplesPerChannel;
   }
 
-  /**
-   * Convert f32le interleaved audio to f32 planar format.
-   */
   private convertToPlanar(data: Buffer, samplesPerChannel: number, numChannels: number): Uint8Array {
     const bytesPerSample = 4; // f32
     const planeSize = samplesPerChannel * bytesPerSample;
@@ -323,9 +309,6 @@ export class NodeAvAudioEncoder extends EventEmitter {
     return result;
   }
 
-  /**
-   * Convert f32le interleaved audio to s16 interleaved format.
-   */
   private convertToS16Interleaved(data: Buffer, samplesPerChannel: number, numChannels: number): Uint8Array {
     const totalSamples = samplesPerChannel * numChannels;
     const result = new Uint8Array(totalSamples * 2); // 2 bytes per s16 sample
@@ -342,9 +325,6 @@ export class NodeAvAudioEncoder extends EventEmitter {
     return result;
   }
 
-  /**
-   * Convert f32le interleaved audio to s16 planar format.
-   */
   private convertToS16Planar(data: Buffer, samplesPerChannel: number, numChannels: number): Uint8Array {
     const bytesPerSample = 2; // s16
     const planeSize = samplesPerChannel * bytesPerSample;

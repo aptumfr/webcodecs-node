@@ -7,6 +7,10 @@
 
 import { FilterAPI, HardwareContext } from 'node-av/api';
 
+import { createLogger } from '../utils/logger.js';
+
+const logger = createLogger('HardwarePipeline');
+
 export type HardwareType = 'cuda' | 'vaapi' | 'qsv' | 'videotoolbox' | 'drm' | 'v4l2m2m' | 'software';
 
 /**
@@ -212,12 +216,12 @@ export function selectBestFilterChain(
   // If we've exhausted all candidates, use the most compatible fallback
   if (currentIndex >= candidates.length) {
     const fallback = `hwdownload,format=nv12,format=${outputFormat}`;
-    console.log(`[HardwarePipeline] All chains exhausted for ${hwType}/${outputFormat}, using final fallback`);
+    logger.debug(`All chains exhausted for ${hwType}/${outputFormat}, using final fallback`);
     return fallback;
   }
 
   const chain = candidates[currentIndex];
-  console.log(`[HardwarePipeline] Trying chain ${currentIndex + 1}/${candidates.length} for ${hwType}/${outputFormat}: ${chain}`);
+  logger.debug(`Trying chain ${currentIndex + 1}/${candidates.length} for ${hwType}/${outputFormat}: ${chain}`);
 
   return chain;
 }
@@ -242,12 +246,12 @@ export function getNextFilterChain(
   const candidates = buildCandidateChains(hwType, outputFormat, isHardwareFrame);
 
   if (currentIndex >= candidates.length) {
-    console.log(`[HardwarePipeline] All ${candidates.length} chains failed for ${hwType}/${outputFormat}`);
+    logger.debug(`All ${candidates.length} chains failed for ${hwType}/${outputFormat}`);
     return null;
   }
 
   const chain = candidates[currentIndex];
-  console.log(`[HardwarePipeline] Falling back to chain ${currentIndex + 1}/${candidates.length}: ${chain}`);
+  logger.debug(`Falling back to chain ${currentIndex + 1}/${candidates.length}: ${chain}`);
 
   return chain;
 }

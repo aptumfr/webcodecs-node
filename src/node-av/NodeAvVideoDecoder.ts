@@ -1,3 +1,10 @@
+/**
+ * NodeAvVideoDecoder - Video decoder using node-av native bindings
+ *
+ * Implements the VideoDecoderBackend interface for decoding video streams
+ * using FFmpeg's libav* libraries via node-av.
+ */
+
 import { EventEmitter } from 'events';
 
 import { Decoder, FilterAPI, HardwareContext } from 'node-av/api';
@@ -23,35 +30,40 @@ import {
   type AVPixelFormat,
 } from 'node-av/constants';
 
-import type { DecoderConfig } from '../ffmpeg/types.js';
+import type {
+  VideoDecoderBackend,
+  VideoDecoderBackendConfig,
+  DecodedFrame,
+} from '../backends/types.js';
+import { DEFAULT_FRAMERATE } from '../backends/types.js';
 import { parseCodecString } from '../hardware/index.js';
+import { createLogger } from '../utils/logger.js';
 import { selectBestFilterChain, getNextFilterChain, describePipeline } from './HardwarePipeline.js';
 
-type DecoderOptions = DecoderConfig & {
-  description?: Buffer | Uint8Array;
-  framerate?: number;
-  hardwareAcceleration?: 'no-preference' | 'prefer-hardware' | 'prefer-software';
-};
+const logger = createLogger('NodeAvVideoDecoder');
+
+/** Maximum filter chain fallback attempts */
+const MAX_FILTER_CHAIN_ATTEMPTS = 10;
+
+/** Known problematic hardware decoders */
+const SKIP_HARDWARE_CODECS = ['vp9', 'av1'];
 
 /**
- * NodeAV-backed video decoder.
- *
- * Mirrors the FFmpegProcess decoder surface (startDecoder/write/end/kill)
- * so it can be swapped without touching callers.
+ * NodeAV-backed video decoder implementing VideoDecoderBackend interface
  */
-export class NodeAvVideoDecoder extends EventEmitter {
+export class NodeAvVideoDecoder extends EventEmitter implements VideoDecoderBackend {
   private decoder: Decoder | null = null;
   private hardware: HardwareContext | null = null;
   private formatContext: FormatContext | null = null;
   private stream: Stream | null = null;
   private filter: FilterAPI | null = null;
-  private config: DecoderOptions | null = null;
+  private config: VideoDecoderBackendConfig | null = null;
   private queue: Buffer[] = [];
   private processing = false;
   private processingPromise: Promise<void> | null = null;
   private shuttingDown = false;
   private packetIndex = 0;
-  private packetTimeBase: Rational = new Rational(1, 30);
+  private packetTimeBase: Rational = new Rational(1, DEFAULT_FRAMERATE);
   private outputPixelFormat: AVPixelFormat = AV_PIX_FMT_YUV420P;
   private filterDescription: string | null = null;
   private hardwarePreference: 'no-preference' | 'prefer-hardware' | 'prefer-software' = 'no-preference';
@@ -60,9 +72,9 @@ export class NodeAvVideoDecoder extends EventEmitter {
     return !this.shuttingDown;
   }
 
-  startDecoder(config: DecoderOptions): void {
+  startDecoder(config: VideoDecoderBackendConfig): void {
     this.config = { ...config };
-    const framerate = config.framerate ?? 30;
+    const framerate = config.framerate ?? DEFAULT_FRAMERATE;
     this.packetTimeBase = new Rational(1, framerate);
     this.outputPixelFormat = mapPixelFormat(config.outputPixelFormat ?? 'yuv420p');
     this.hardwarePreference = config.hardwareAcceleration ?? 'no-preference';
@@ -144,10 +156,9 @@ export class NodeAvVideoDecoder extends EventEmitter {
     }
 
     // Only try hardware if explicitly requested and not a known problematic codec
-    const skipHardwareCodecs = ['vp9', 'av1']; // Known problematic HW decoders on some systems
     const shouldTryHardware =
       this.hardwarePreference === 'prefer-hardware' &&
-      !skipHardwareCodecs.includes(codecName);
+      !SKIP_HARDWARE_CODECS.includes(codecName);
 
     if (shouldTryHardware) {
       try {
@@ -162,13 +173,19 @@ export class NodeAvVideoDecoder extends EventEmitter {
       exitOnError: true,
     });
 
+    this.logDecoderSelection(codecName);
+  }
+
+  private logDecoderSelection(codecName: string): void {
     const hwName = this.hardware?.deviceTypeName;
-    if (hwName && this.decoder.isHardware()) {
-      console.log(`[NodeAvVideoDecoder] Using hardware decoder (${hwName})`);
+    if (hwName && this.decoder?.isHardware()) {
+      logger.info(`Using hardware decoder (${hwName}) for ${codecName}`);
     } else if (hwName) {
-      console.log(`[NodeAvVideoDecoder] Hardware context ${hwName} unavailable, decoding in software`);
+      logger.info(`Hardware context ${hwName} unavailable, decoding in software`);
     } else if (this.hardwarePreference === 'prefer-hardware') {
-      console.log('[NodeAvVideoDecoder] Hardware requested but not available, decoding in software');
+      logger.info('Hardware requested but not available, decoding in software');
+    } else {
+      logger.debug(`Using software decoder for ${codecName}`);
     }
   }
 
@@ -226,9 +243,8 @@ export class NodeAvVideoDecoder extends EventEmitter {
     // Try to process with current or new filter chain
     // If it fails, automatically try the next chain in the fallback sequence
     let attempts = 0;
-    const maxAttempts = 10; // Prevent infinite loops
 
-    while (attempts < maxAttempts) {
+    while (attempts < MAX_FILTER_CHAIN_ATTEMPTS) {
       attempts++;
 
       // Get filter chain (either current or select new one)
@@ -245,7 +261,7 @@ export class NodeAvVideoDecoder extends EventEmitter {
 
         // Log the selected pipeline
         const hwType = this.hardware?.deviceTypeName ?? 'software';
-        console.log(`[NodeAvVideoDecoder] Pipeline: ${describePipeline(description, hwType)}`);
+        logger.debug(`Pipeline: ${describePipeline(description, hwType)}`);
 
         try {
           this.filter = FilterAPI.create(description, {
@@ -254,7 +270,7 @@ export class NodeAvVideoDecoder extends EventEmitter {
           this.filterDescription = description;
         } catch (err) {
           // Filter creation failed, try next chain
-          console.log(`[NodeAvVideoDecoder] Filter creation failed, trying next chain...`);
+          logger.debug('Filter creation failed, trying next chain...');
           this.filter = null;
           this.filterDescription = null;
           const nextChain = getNextFilterChain(this.hardware, outputFormatName, isHardwareFrame);
@@ -283,7 +299,7 @@ export class NodeAvVideoDecoder extends EventEmitter {
         return buffer;
       } catch (err) {
         // Processing failed - close filter and try next chain
-        console.log(`[NodeAvVideoDecoder] Filter processing failed: ${err instanceof Error ? err.message : err}`);
+        logger.debug(`Filter processing failed: ${err instanceof Error ? err.message : err}`);
         this.filter?.close();
         this.filter = null;
         this.filterDescription = null;
@@ -296,7 +312,7 @@ export class NodeAvVideoDecoder extends EventEmitter {
       }
     }
 
-    throw new Error(`Failed to find working filter chain after ${maxAttempts} attempts`);
+    throw new Error(`Failed to find working filter chain after ${MAX_FILTER_CHAIN_ATTEMPTS} attempts`);
   }
 
   private async finish(): Promise<void> {

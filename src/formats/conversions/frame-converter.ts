@@ -276,6 +276,159 @@ export function convertRgbToYuv(
 }
 
 /**
+ * Clamp a value to the 0-255 byte range
+ */
+function clampByte(val: number): number {
+  return Math.max(0, Math.min(255, val));
+}
+
+/**
+ * Convert RGBA buffer to I420 (YUV420P) planar format
+ * Optimized direct conversion without intermediate allocations
+ */
+export function convertRgbaToI420(rgba: Uint8Array | Buffer, width: number, height: number): Uint8Array {
+  const ySize = width * height;
+  const uvSize = (width / 2) * (height / 2);
+  const out = new Uint8Array(ySize + 2 * uvSize);
+  const yPlane = out.subarray(0, ySize);
+  const uPlane = out.subarray(ySize, ySize + uvSize);
+  const vPlane = out.subarray(ySize + uvSize);
+
+  for (let j = 0; j < height; j += 2) {
+    for (let i = 0; i < width; i += 2) {
+      let uSum = 0;
+      let vSum = 0;
+
+      for (let dy = 0; dy < 2; dy++) {
+        for (let dx = 0; dx < 2; dx++) {
+          const x = i + dx;
+          const y = j + dy;
+          const idx = (y * width + x) * 4;
+          const r = rgba[idx];
+          const g = rgba[idx + 1];
+          const b = rgba[idx + 2];
+
+          // BT.601 conversion
+          const yVal = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+          yPlane[y * width + x] = clampByte(yVal);
+
+          const uVal = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+          const vVal = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+          uSum += uVal;
+          vSum += vVal;
+        }
+      }
+
+      uPlane[(j / 2) * (width / 2) + i / 2] = clampByte(uSum >> 2);
+      vPlane[(j / 2) * (width / 2) + i / 2] = clampByte(vSum >> 2);
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Convert RGBA buffer to NV12 (Y plane + interleaved UV plane)
+ */
+export function convertRgbaToNv12(rgba: Uint8Array | Buffer, width: number, height: number): Uint8Array {
+  const ySize = width * height;
+  const uvSize = (width / 2) * (height / 2) * 2; // Interleaved UV
+  const out = new Uint8Array(ySize + uvSize);
+  const yPlane = out.subarray(0, ySize);
+  const uvPlane = out.subarray(ySize);
+
+  for (let j = 0; j < height; j += 2) {
+    for (let i = 0; i < width; i += 2) {
+      let uSum = 0;
+      let vSum = 0;
+
+      for (let dy = 0; dy < 2; dy++) {
+        for (let dx = 0; dx < 2; dx++) {
+          const x = i + dx;
+          const y = j + dy;
+          const idx = (y * width + x) * 4;
+
+          const r = rgba[idx];
+          const g = rgba[idx + 1];
+          const b = rgba[idx + 2];
+
+          // BT.601 coefficients
+          const yVal = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+          yPlane[y * width + x] = clampByte(yVal);
+
+          const uVal = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+          const vVal = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+          uSum += uVal;
+          vSum += vVal;
+        }
+      }
+
+      // NV12 has interleaved UV: UVUVUV...
+      const uvIdx = (j / 2) * width + i;
+      uvPlane[uvIdx] = clampByte(uSum >> 2);     // U
+      uvPlane[uvIdx + 1] = clampByte(vSum >> 2); // V
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Convert NV12 (Y + interleaved UV) to I420 (Y + U + V planar)
+ */
+export function convertNv12ToI420(nv12: Uint8Array | Buffer, width: number, height: number): Uint8Array {
+  const ySize = width * height;
+  const uvWidth = width / 2;
+  const uvHeight = height / 2;
+  const uvPlaneSize = uvWidth * uvHeight;
+  const uvInterleavedSize = uvPlaneSize * 2;
+
+  const out = new Uint8Array(ySize + 2 * uvPlaneSize);
+  const yPlane = out.subarray(0, ySize);
+  const uPlane = out.subarray(ySize, ySize + uvPlaneSize);
+  const vPlane = out.subarray(ySize + uvPlaneSize);
+
+  // Copy Y plane directly
+  yPlane.set(nv12.subarray(0, ySize));
+
+  // De-interleave UV plane
+  const uvInterleaved = nv12.subarray(ySize, ySize + uvInterleavedSize);
+  for (let i = 0; i < uvPlaneSize; i++) {
+    uPlane[i] = uvInterleaved[i * 2];
+    vPlane[i] = uvInterleaved[i * 2 + 1];
+  }
+
+  return out;
+}
+
+/**
+ * Convert I420 (Y + U + V planar) to NV12 (Y + interleaved UV)
+ */
+export function convertI420ToNv12(i420: Uint8Array | Buffer, width: number, height: number): Uint8Array {
+  const ySize = width * height;
+  const uvWidth = width / 2;
+  const uvHeight = height / 2;
+  const uvPlaneSize = uvWidth * uvHeight;
+
+  const out = new Uint8Array(ySize + uvPlaneSize * 2);
+  const yPlane = out.subarray(0, ySize);
+  const uvPlane = out.subarray(ySize);
+
+  // Copy Y plane directly
+  yPlane.set(i420.subarray(0, ySize));
+
+  // Interleave U and V planes
+  const uPlane = i420.subarray(ySize, ySize + uvPlaneSize);
+  const vPlane = i420.subarray(ySize + uvPlaneSize);
+  for (let i = 0; i < uvPlaneSize; i++) {
+    uvPlane[i * 2] = uPlane[i];
+    uvPlane[i * 2 + 1] = vPlane[i];
+  }
+
+  return out;
+}
+
+/**
  * Convert between any two pixel formats
  */
 export function convertFrameFormat(

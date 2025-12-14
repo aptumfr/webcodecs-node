@@ -46,7 +46,6 @@ async function encodeFrames(
     height,
     framerate: 30,
     bitrate: 500_000,
-    backend: 'node-av',
   });
 
   for (let f = 0; f < numFrames; f++) {
@@ -84,7 +83,6 @@ async function decodeChunks(
     codedWidth: width,
     codedHeight: height,
     outputFormat,
-    backend: 'node-av',
   });
 
   for (const chunk of chunks) {

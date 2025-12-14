@@ -29,8 +29,7 @@ async function encodeTestFrames(
   codec: string,
   width: number,
   height: number,
-  numFrames: number,
-  backend: 'node-av' | 'ffmpeg' = 'node-av'
+  numFrames: number
 ): Promise<{ chunks: EncodedVideoChunk[]; error: Error | null }> {
   const chunks: EncodedVideoChunk[] = [];
   let err: Error | null = null;
@@ -46,7 +45,6 @@ async function encodeTestFrames(
     height,
     framerate: 30,
     bitrate: 500_000,
-    backend,
   });
 
   for (let f = 0; f < numFrames; f++) {
@@ -93,7 +91,6 @@ describe('NodeAV VideoEncoder backend', () => {
         height,
         framerate: 30,
         bitrate: 500_000,
-        backend: 'node-av',
       });
 
       // Create I420 frames
@@ -218,7 +215,6 @@ describe('NodeAV VideoEncoder backend', () => {
           codec: 'invalid-codec',
           width: 64,
           height: 64,
-          backend: 'node-av',
         });
       }).toThrow();
 

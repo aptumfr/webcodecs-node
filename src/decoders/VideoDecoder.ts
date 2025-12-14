@@ -8,7 +8,6 @@ import { Buffer } from 'buffer';
 import { VideoFrame } from '../core/VideoFrame.js';
 import type { VideoPixelFormat } from '../core/VideoFrame.js';
 import { EncodedVideoChunk } from '../core/EncodedVideoChunk.js';
-import { FFmpegProcess } from '../FFmpegProcess.js';
 import { NodeAvVideoDecoder } from '../node-av/NodeAvVideoDecoder.js';
 import { DOMException } from '../types/index.js';
 import type { VideoColorSpaceInit } from '../formats/index.js';
@@ -18,12 +17,6 @@ import type { AvcConfig } from '../utils/avc.js';
 import { convertAvccToAnnexB, parseAvcDecoderConfig } from '../utils/avc.js';
 import type { HvccConfig } from '../utils/hevc.js';
 import { convertHvccToAnnexB, parseHvccDecoderConfig } from '../utils/hevc.js';
-import type { HardwareAccelerationMethod } from '../hardware/index.js';
-import {
-  getBestDecoderSync,
-  getDecoderArgs,
-  parseCodecString,
-} from '../hardware/index.js';
 
 const SUPPORTED_OUTPUT_FORMATS: VideoPixelFormat[] = [
   'I420', 'I420A', 'I422', 'I444', 'NV12', 'RGBA', 'RGBX', 'BGRA', 'BGRX'
@@ -42,8 +35,6 @@ export interface VideoDecoderConfig {
   hardwareAcceleration?: 'no-preference' | 'prefer-hardware' | 'prefer-software';
   optimizeForLatency?: boolean;
   outputFormat?: VideoPixelFormat;
-  /** Backend selection: defaults to node-av, falls back to ffmpeg CLI */
-  backend?: 'node-av' | 'ffmpeg';
 }
 
 export interface VideoDecoderInit {
@@ -64,23 +55,14 @@ export class VideoDecoder extends EventEmitter {
   private _config: VideoDecoderConfig | null = null;
   private _outputCallback: (frame: VideoFrame) => void;
   private _errorCallback: (error: Error) => void;
-  private _ffmpeg: FFmpegProcess | NodeAvVideoDecoder | null = null;
+  private _decoder: NodeAvVideoDecoder | null = null;
   private _frameTimestamp = 0;
   private _frameDuration = 0;
   private _pendingChunks: { timestamp: number; duration: number | null }[] = [];
-  private _useIvf = false;
-  private _ivfHeaderSent = false;
-  private _frameIndex = 0;
   private _outputFormat: VideoPixelFormat = 'I420';
   private _avcConfig: AvcConfig | null = null;
   private _hevcConfig: HvccConfig | null = null;
   private _hardwarePreference: 'no-preference' | 'prefer-hardware' | 'prefer-software' = 'no-preference';
-  private _hardwareDecoderSelection: {
-    decoder: string | null;
-    hwaccel: HardwareAccelerationMethod | null;
-    isHardware: boolean;
-  } | null = null;
-  private _backendName: 'node-av' | 'ffmpeg' = 'node-av';
 
   constructor(init: VideoDecoderInit) {
     super();
@@ -151,26 +133,18 @@ export class VideoDecoder extends EventEmitter {
       throw new TypeError(`Invalid outputFormat: ${config.outputFormat}`);
     }
 
-    if (this._ffmpeg) {
-      this._ffmpeg.kill();
-      this._ffmpeg = null;
+    if (this._decoder) {
+      this._decoder.kill();
+      this._decoder = null;
     }
 
     this._config = { ...config };
     this._outputFormat = config.outputFormat ?? 'I420';
     this._state = 'configured';
     this._pendingChunks = [];
-    this._ivfHeaderSent = false;
-    this._frameIndex = 0;
     this._avcConfig = this._parseAvcDescription(config);
     this._hevcConfig = this._parseHevcDescription(config);
     this._hardwarePreference = config.hardwareAcceleration ?? 'no-preference';
-    this._hardwareDecoderSelection = null;
-    this._backendName = 'node-av';
-
-    if (this._hardwarePreference === 'prefer-hardware') {
-      this._hardwareDecoderSelection = this._selectHardwareDecoder(config.codec);
-    }
 
     if (config.codedWidth && config.codedHeight) {
       this._startDecoder();
@@ -186,8 +160,8 @@ export class VideoDecoder extends EventEmitter {
       throw new TypeError('chunk must be an EncodedVideoChunk');
     }
 
-    if (!this._ffmpeg?.isHealthy) {
-      if (!this._ffmpeg) {
+    if (!this._decoder?.isHealthy) {
+      if (!this._decoder) {
         this._safeErrorCallback(new Error('Decoder not fully initialized - missing dimensions'));
       } else {
         this._safeErrorCallback(new Error('Decoder process is not healthy'));
@@ -202,11 +176,10 @@ export class VideoDecoder extends EventEmitter {
       duration: chunk.duration,
     });
 
-    let writeSuccess = false;
     let dataToWrite: Buffer | Uint8Array = chunk._buffer;
 
     const codecBase = this._config?.codec.split('.')[0].toLowerCase();
-    if (!this._useIvf && codecBase) {
+    if (codecBase) {
       if (this._avcConfig && (codecBase === 'avc1' || codecBase === 'avc3')) {
         const includeParameterSets = chunk.type === 'key';
         dataToWrite = convertAvccToAnnexB(chunk._buffer, this._avcConfig, includeParameterSets);
@@ -216,12 +189,8 @@ export class VideoDecoder extends EventEmitter {
       }
     }
 
-    if (this._useIvf) {
-      writeSuccess = this._writeIvfFrame(chunk._buffer, this._frameIndex++);
-    } else {
-      const bufferData = Buffer.isBuffer(dataToWrite) ? dataToWrite : Buffer.from(dataToWrite);
-      writeSuccess = this._ffmpeg.write(bufferData);
-    }
+    const bufferData = Buffer.isBuffer(dataToWrite) ? dataToWrite : Buffer.from(dataToWrite);
+    const writeSuccess = this._decoder.write(bufferData);
 
     if (!writeSuccess) {
       this._decodeQueueSize = Math.max(0, this._decodeQueueSize - 1);
@@ -236,7 +205,7 @@ export class VideoDecoder extends EventEmitter {
     }
 
     return new Promise((resolve, reject) => {
-      if (!this._ffmpeg) {
+      if (!this._decoder) {
         resolve();
         return;
       }
@@ -257,9 +226,7 @@ export class VideoDecoder extends EventEmitter {
         cleanup();
         this._decodeQueueSize = 0;
         this._pendingChunks = [];
-        this._frameIndex = 0;
-        this._ivfHeaderSent = false;
-        this._ffmpeg = null;
+        this._decoder = null;
         if (this._config?.codedWidth && this._config?.codedHeight) {
           this._startDecoder();
         }
@@ -277,9 +244,9 @@ export class VideoDecoder extends EventEmitter {
         doReject(new DOMException('Flush operation timed out', 'TimeoutError'));
       }, timeout);
 
-      this._ffmpeg.end();
-      this._ffmpeg.once('close', doResolve);
-      this._ffmpeg.once('error', doReject);
+      this._decoder.end();
+      this._decoder.once('close', doResolve);
+      this._decoder.once('error', doReject);
     });
   }
 
@@ -288,7 +255,7 @@ export class VideoDecoder extends EventEmitter {
       throw new DOMException('Decoder is closed', 'InvalidStateError');
     }
 
-    this._stopFFmpeg();
+    this._stopDecoder();
     this._state = 'unconfigured';
     this._config = null;
     this._decodeQueueSize = 0;
@@ -300,7 +267,7 @@ export class VideoDecoder extends EventEmitter {
   close(): void {
     if (this._state === 'closed') return;
 
-    this._stopFFmpeg();
+    this._stopDecoder();
     this._state = 'closed';
     this._config = null;
     this._decodeQueueSize = 0;
@@ -312,84 +279,34 @@ export class VideoDecoder extends EventEmitter {
   private _startDecoder(): void {
     if (!this._config?.codedWidth || !this._config?.codedHeight) return;
 
-    const codecBase = this._config.codec.split('.')[0].toLowerCase();
-    this._useIvf = false;
-    this._ivfHeaderSent = false;
-    this._frameIndex = 0;
+    const pixFmt = pixelFormatToFFmpeg(this._outputFormat);
+    const description = this._getDescriptionBuffer();
 
-    this._ffmpeg = this._createDecoderProcess();
+    this._decoder = new NodeAvVideoDecoder();
 
-    const ffmpegPixFmt = pixelFormatToFFmpeg(this._outputFormat);
-    const hardwareOptions = this._getHardwareDecoderArgs(ffmpegPixFmt);
+    this._decoder.startDecoder({
+      codec: this._config.codec,
+      width: this._config.codedWidth,
+      height: this._config.codedHeight,
+      framerate: this._config.optimizeForLatency ? 60 : 30,
+      outputPixelFormat: pixFmt,
+      description: description ?? undefined,
+      hardwareAcceleration: this._hardwarePreference,
+    });
 
-    if (this._ffmpeg instanceof NodeAvVideoDecoder) {
-      this._backendName = 'node-av';
-      const description = this._getDescriptionBuffer();
-      this._ffmpeg.startDecoder({
-        codec: this._config.codec,
-        width: this._config.codedWidth,
-        height: this._config.codedHeight,
-        framerate: this._config.optimizeForLatency ? 60 : 30,
-        outputPixelFormat: ffmpegPixFmt,
-        description: description ?? undefined,
-        hardwareAcceleration: this._hardwarePreference,
-      });
-    } else {
-      this._backendName = 'ffmpeg';
-      this._useIvf = ['vp8', 'vp9', 'vp09', 'av01', 'av1'].includes(codecBase);
-      this._ffmpeg.startDecoder({
-        codec: this._config.codec,
-        width: this._config.codedWidth,
-        height: this._config.codedHeight,
-        outputPixelFormat: ffmpegPixFmt,
-        hardwareDecoderArgs: hardwareOptions.args ?? undefined,
-        hardwareDownloadFilter: hardwareOptions.filter ?? undefined,
-      });
-    }
-
-    this._ffmpeg.on('frame', (data: Buffer) => {
+    this._decoder.on('frame', (data: Buffer) => {
       this._handleDecodedFrame(data);
     });
 
-    this._ffmpeg.on('error', (err: Error) => {
+    this._decoder.on('error', (err: Error) => {
       this._safeErrorCallback(err);
     });
   }
 
-  private _stopFFmpeg(): void {
-    if (this._ffmpeg) {
-      this._ffmpeg.kill();
-      this._ffmpeg = null;
-    }
-  }
-
-  private _createDecoderProcess(): FFmpegProcess | NodeAvVideoDecoder {
-    const requestedBackend = this._config?.backend ?? process.env.WEBCODECS_BACKEND ?? 'node-av';
-    if (requestedBackend !== 'ffmpeg') {
-      try {
-        return new NodeAvVideoDecoder();
-      } catch {
-        // Fall back
-      }
-    }
-    return new FFmpegProcess();
-  }
-
-  private _selectHardwareDecoder(codec: string): {
-    decoder: string | null;
-    hwaccel: HardwareAccelerationMethod | null;
-    isHardware: boolean;
-  } | null {
-    const codecName = parseCodecString(codec);
-    if (!codecName) {
-      return null;
-    }
-
-    try {
-      const selection = getBestDecoderSync(codecName, 'prefer-hardware');
-      return selection.isHardware ? selection : null;
-    } catch {
-      return null;
+  private _stopDecoder(): void {
+    if (this._decoder) {
+      this._decoder.kill();
+      this._decoder = null;
     }
   }
 
@@ -477,37 +394,6 @@ export class VideoDecoder extends EventEmitter {
     return null;
   }
 
-  private _getHardwareDecoderArgs(ffmpegPixFmt: string): { args: string[] | null; filter: string | null } {
-    if (!this._config) {
-      return { args: null, filter: null };
-    }
-
-    if (this._hardwarePreference !== 'prefer-hardware') {
-      return { args: null, filter: null };
-    }
-
-    if (!this._hardwareDecoderSelection?.isHardware) {
-      return { args: null, filter: null };
-    }
-
-    try {
-      const args = getDecoderArgs(
-        this._hardwareDecoderSelection.decoder,
-        this._hardwareDecoderSelection.hwaccel
-      );
-
-      const needsDownload = ['vaapi', 'cuda', 'qsv'].includes(
-        this._hardwareDecoderSelection.hwaccel ?? 'none'
-      );
-      const filter = needsDownload ? `hwdownload,format=${ffmpegPixFmt}` : null;
-
-      return { args, filter };
-    } catch {
-      this._hardwareDecoderSelection = null;
-      return { args: null, filter: null };
-    }
-  }
-
   private _handleDecodedFrame(data: Buffer): void {
     if (!this._config) return;
 
@@ -528,50 +414,5 @@ export class VideoDecoder extends EventEmitter {
     this.emit('dequeue');
 
     this._safeOutputCallback(frame);
-  }
-
-  private _writeIvfHeader(): void {
-    if (!this._config || !this._ffmpeg) return;
-
-    const header = Buffer.alloc(32);
-    header.write('DKIF', 0);
-    header.writeUInt16LE(0, 4);
-    header.writeUInt16LE(32, 6);
-
-    const codecBase = this._config.codec.split('.')[0].toLowerCase();
-    if (codecBase === 'vp8') {
-      header.write('VP80', 8);
-    } else if (codecBase === 'vp9' || codecBase === 'vp09') {
-      header.write('VP90', 8);
-    } else if (codecBase === 'av01' || codecBase === 'av1') {
-      header.write('AV01', 8);
-    }
-
-    header.writeUInt16LE(this._config.codedWidth!, 12);
-    header.writeUInt16LE(this._config.codedHeight!, 14);
-    header.writeUInt32LE(30, 16);
-    header.writeUInt32LE(1, 20);
-    header.writeUInt32LE(0, 24);
-    header.writeUInt32LE(0, 28);
-
-    this._ffmpeg.write(header);
-    this._ivfHeaderSent = true;
-  }
-
-  private _writeIvfFrame(data: Uint8Array, frameIndex: number): boolean {
-    if (!this._ffmpeg) return false;
-
-    if (!this._ivfHeaderSent) {
-      this._writeIvfHeader();
-    }
-
-    const frameHeader = Buffer.alloc(12);
-    frameHeader.writeUInt32LE(data.length, 0);
-    const timestamp = BigInt(frameIndex);
-    frameHeader.writeBigUInt64LE(timestamp, 4);
-
-    const headerSuccess = this._ffmpeg.write(frameHeader);
-    const dataSuccess = this._ffmpeg.write(Buffer.from(data));
-    return headerSuccess && dataSuccess;
   }
 }

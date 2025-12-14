@@ -17,3 +17,11 @@ export {
   convertFrameFormat,
   type FrameBuffer,
 } from './frame-converter.js';
+
+// Optimized direct conversions for encoder/decoder use
+export {
+  convertRgbaToI420,
+  convertRgbaToNv12,
+  convertNv12ToI420,
+  convertI420ToNv12,
+} from './frame-converter.js';

@@ -1,3 +1,10 @@
+/**
+ * NodeAvAudioDecoder - Audio decoder using node-av native bindings
+ *
+ * Implements the AudioDecoderBackend interface for decoding audio streams
+ * using FFmpeg's libav* libraries via node-av.
+ */
+
 import { EventEmitter } from 'events';
 
 import { Decoder, FilterAPI } from 'node-av/api';
@@ -28,58 +35,54 @@ import {
   type AVCodecID,
 } from 'node-av/constants';
 
+import type {
+  AudioDecoderBackend,
+  AudioDecoderBackendConfig,
+  DecodedFrame,
+} from '../backends/types.js';
 import type { AudioSampleFormat } from '../types/audio.js';
 import type { AacConfig } from '../utils/aac.js';
 import { wrapAacFrameWithAdts } from '../utils/aac.js';
+import { createLogger } from '../utils/logger.js';
 
-interface AudioDecoderConfig {
-  codec: string;
-  sampleRate: number;
-  numberOfChannels: number;
-  description?: ArrayBuffer | ArrayBufferView;
-  outputFormat?: AudioSampleFormat;
-}
+const logger = createLogger('NodeAvAudioDecoder');
+
+/** Default sample rate for audio decoding */
+const DEFAULT_SAMPLE_RATE = 48000;
 
 /**
- * NodeAV-backed audio decoder.
- *
- * Mirrors the FFmpeg spawn-based audio decoder surface so it can be swapped
- * without touching callers.
+ * NodeAV-backed audio decoder implementing AudioDecoderBackend interface
  */
-export class NodeAvAudioDecoder extends EventEmitter {
+export class NodeAvAudioDecoder extends EventEmitter implements AudioDecoderBackend {
   private decoder: Decoder | null = null;
   private formatContext: FormatContext | null = null;
   private stream: Stream | null = null;
   private filter: FilterAPI | null = null;
-  private config: AudioDecoderConfig | null = null;
+  private config: AudioDecoderBackendConfig | null = null;
   private queue: Buffer[] = [];
   private processing = false;
   private processingPromise: Promise<void> | null = null;
   private shuttingDown = false;
   private packetIndex = 0;
   private frameIndex = 0;
-  private packetTimeBase: Rational = new Rational(1, 48000);
+  private packetTimeBase: Rational = new Rational(1, DEFAULT_SAMPLE_RATE);
   private outputSampleFormat: AVSampleFormat = AV_SAMPLE_FMT_FLT;
   private filterDescription: string | null = null;
   private aacConfig: AacConfig | null = null;
+  private outputFormat: AudioSampleFormat = 'f32';
 
   get isHealthy(): boolean {
     return !this.shuttingDown;
   }
 
-  /**
-   * Start the audio decoder with given configuration.
-   */
-  startDecoder(config: AudioDecoderConfig): void {
+  startDecoder(config: AudioDecoderBackendConfig): void {
     this.config = { ...config };
     this.packetTimeBase = new Rational(1, config.sampleRate);
-    this.outputSampleFormat = mapSampleFormat(config.outputFormat ?? 'f32');
+    this.outputFormat = this.parseOutputFormat(config);
+    this.outputSampleFormat = mapSampleFormat(this.outputFormat);
     this.aacConfig = this.parseAacDescription(config);
   }
 
-  /**
-   * Write encoded audio data to the decoder.
-   */
   write(data: Buffer | Uint8Array): boolean {
     if (!this.config || this.shuttingDown) {
       return false;
@@ -96,27 +99,18 @@ export class NodeAvAudioDecoder extends EventEmitter {
     return true;
   }
 
-  /**
-   * Signal end-of-stream; flush remaining frames and emit 'close'.
-   */
   end(): void {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
     void this.finish().catch((err) => this.emit('error', err));
   }
 
-  /**
-   * Stop immediately.
-   */
   kill(): void {
     this.shuttingDown = true;
     this.cleanup();
     this.emit('close', null);
   }
 
-  /**
-   * Graceful shutdown.
-   */
   async shutdown(): Promise<void> {
     this.end();
   }
@@ -184,7 +178,12 @@ export class NodeAvAudioDecoder extends EventEmitter {
       exitOnError: true,
     });
 
-    console.log(`[NodeAvAudioDecoder] Created decoder for codec: ${this.config.codec}`);
+    logger.info(`Created decoder for codec: ${this.config.codec}`);
+  }
+
+  private parseOutputFormat(config: AudioDecoderBackendConfig): AudioSampleFormat {
+    // Default to f32 if not specified
+    return 'f32';
   }
 
   private async decodeBuffer(buffer: Buffer): Promise<void> {
@@ -265,7 +264,7 @@ export class NodeAvAudioDecoder extends EventEmitter {
     return buffer;
   }
 
-  private parseAacDescription(config: AudioDecoderConfig): AacConfig | null {
+  private parseAacDescription(config: AudioDecoderBackendConfig): AacConfig | null {
     const codecBase = config.codec.split('.')[0].toLowerCase();
     const isAac = codecBase === 'mp4a' || codecBase === 'aac';
 

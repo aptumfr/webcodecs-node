@@ -7,28 +7,11 @@ import { EventEmitter } from 'events';
 import { VideoFrame } from '../core/VideoFrame.js';
 import { EncodedVideoChunk } from '../core/EncodedVideoChunk.js';
 import type { EncodedVideoChunkType } from '../core/EncodedVideoChunk.js';
-import { FFmpegProcess } from '../FFmpegProcess.js';
 import { DOMException } from '../types/index.js';
 import type { VideoPixelFormat } from '../core/VideoFrame.js';
 import { isVideoCodecBaseSupported } from '../capabilities/index.js';
 import { pixelFormatToFFmpeg } from '../ffmpeg/formats.js';
-import {
-  convertAnnexBToAvcc,
-  extractAvcParameterSetsFromAnnexB,
-  buildAvcDecoderConfig,
-} from '../utils/avc.js';
-import {
-  convertAnnexBToHvcc,
-  extractHevcParameterSetsFromAnnexB,
-  buildHvccDecoderConfig,
-} from '../utils/hevc.js';
 import { NodeAvVideoEncoder } from '../node-av/NodeAvVideoEncoder.js';
-import type { HardwareAccelerationMethod } from '../hardware/index.js';
-import {
-  getBestEncoderSync,
-  getEncoderArgs,
-  parseCodecString,
-} from '../hardware/index.js';
 
 export type CodecState = 'unconfigured' | 'configured' | 'closed';
 
@@ -46,8 +29,6 @@ export interface VideoEncoderConfig {
   bitrateMode?: 'constant' | 'variable' | 'quantizer';
   latencyMode?: 'quality' | 'realtime';
   format?: 'annexb' | 'mp4';
-  /** Backend selection: defaults to node-av, falls back to ffmpeg CLI */
-  backend?: 'node-av' | 'ffmpeg';
 }
 
 export interface VideoEncoderInit {
@@ -81,22 +62,13 @@ export class VideoEncoder extends EventEmitter {
   private _config: VideoEncoderConfig | null = null;
   private _outputCallback: (chunk: EncodedVideoChunk, metadata?: VideoEncoderOutputMetadata) => void;
   private _errorCallback: (error: Error) => void;
-  private _ffmpeg: FFmpegProcess | NodeAvVideoEncoder | null = null;
-  private _backendName: 'node-av' | 'ffmpeg' = 'node-av';
+  private _encoder: NodeAvVideoEncoder | null = null;
   private _frameCount = 0;
   private _keyFrameInterval = 30;
   private _pendingFrames: { timestamp: number; duration: number | null; keyFrame: boolean }[] = [];
-  private _encodedBuffer: Buffer = Buffer.alloc(0);
   private _firstChunk = true;
   private _inputFormat: VideoPixelFormat | null = null;
-  private _bitstreamFormat: 'annexb' | 'mp4' = 'annexb';
-  private _codecDescription: Uint8Array | null = null;
   private _hardwarePreference: 'no-preference' | 'prefer-hardware' | 'prefer-software' = 'no-preference';
-  private _hardwareEncoderSelection: {
-    encoder: string;
-    hwaccel: HardwareAccelerationMethod | null;
-    isHardware: boolean;
-  } | null = null;
 
   constructor(init: VideoEncoderInit) {
     super();
@@ -175,9 +147,9 @@ export class VideoEncoder extends EventEmitter {
       throw new DOMException(`Codec '${config.codec}' is not supported`, 'NotSupportedError');
     }
 
-    if (this._ffmpeg) {
-      this._ffmpeg.kill();
-      this._ffmpeg = null;
+    if (this._encoder) {
+      this._encoder.kill();
+      this._encoder = null;
     }
 
     this._config = { ...config };
@@ -185,17 +157,8 @@ export class VideoEncoder extends EventEmitter {
     this._frameCount = 0;
     this._firstChunk = true;
     this._pendingFrames = [];
-    this._encodedBuffer = Buffer.alloc(0);
     this._inputFormat = null;
-    this._codecDescription = null;
-    this._bitstreamFormat = config.format ?? 'annexb';
-
     this._hardwarePreference = config.hardwareAcceleration ?? 'no-preference';
-    this._hardwareEncoderSelection = null;
-
-    if (this._hardwarePreference === 'prefer-hardware') {
-      this._hardwareEncoderSelection = this._selectHardwareEncoder(config.codec);
-    }
   }
 
   encode(frame: VideoFrame, options?: VideoEncoderEncodeOptions): void {
@@ -207,13 +170,13 @@ export class VideoEncoder extends EventEmitter {
       throw new TypeError('frame must be a VideoFrame');
     }
 
-    if (!this._ffmpeg) {
+    if (!this._encoder) {
       this._inputFormat = frame.format;
-      const ffmpegFormat = pixelFormatToFFmpeg(frame.format);
-      this._startFFmpeg(ffmpegFormat);
+      const pixFormat = pixelFormatToFFmpeg(frame.format);
+      this._startEncoder(pixFormat);
     }
 
-    if (!this._ffmpeg?.isHealthy) {
+    if (!this._encoder?.isHealthy) {
       this._safeErrorCallback(new Error('Encoder process is not healthy'));
       return;
     }
@@ -236,7 +199,7 @@ export class VideoEncoder extends EventEmitter {
       keyFrame,
     });
 
-    const writeSuccess = this._ffmpeg.write(frame._buffer);
+    const writeSuccess = this._encoder.write(frame._buffer);
     if (!writeSuccess) {
       this._encodeQueueSize = Math.max(0, this._encodeQueueSize - 1);
       this._pendingFrames.pop();
@@ -250,7 +213,7 @@ export class VideoEncoder extends EventEmitter {
     }
 
     return new Promise((resolve, reject) => {
-      if (!this._ffmpeg) {
+      if (!this._encoder) {
         resolve();
         return;
       }
@@ -269,13 +232,9 @@ export class VideoEncoder extends EventEmitter {
         if (resolved) return;
         resolved = true;
         cleanup();
-        if (this._encodedBuffer.length > 0) {
-          this._emitEncodedChunk(this._encodedBuffer);
-          this._encodedBuffer = Buffer.alloc(0);
-        }
         this._encodeQueueSize = 0;
         this._pendingFrames = [];
-        this._ffmpeg = null;
+        this._encoder = null;
         this._inputFormat = null;
         this._frameCount = 0;
         this._firstChunk = true;
@@ -293,9 +252,9 @@ export class VideoEncoder extends EventEmitter {
         doReject(new DOMException('Flush operation timed out', 'TimeoutError'));
       }, timeout);
 
-      this._ffmpeg.end();
-      this._ffmpeg.once('close', doResolve);
-      this._ffmpeg.once('error', doReject);
+      this._encoder.end();
+      this._encoder.once('close', doResolve);
+      this._encoder.once('error', doReject);
     });
   }
 
@@ -304,144 +263,59 @@ export class VideoEncoder extends EventEmitter {
       throw new DOMException('Encoder is closed', 'InvalidStateError');
     }
 
-    this._stopFFmpeg();
+    this._stopEncoder();
     this._state = 'unconfigured';
     this._config = null;
     this._encodeQueueSize = 0;
     this._pendingFrames = [];
     this._frameCount = 0;
-    this._encodedBuffer = Buffer.alloc(0);
     this._firstChunk = true;
     this._inputFormat = null;
-    this._codecDescription = null;
   }
 
   close(): void {
     if (this._state === 'closed') return;
 
-    this._stopFFmpeg();
+    this._stopEncoder();
     this._state = 'closed';
     this._config = null;
     this._encodeQueueSize = 0;
     this._pendingFrames = [];
-    this._codecDescription = null;
   }
 
-  private _startFFmpeg(inputFormat?: string): void {
+  private _startEncoder(inputFormat?: string): void {
     if (!this._config) return;
 
-    const ffmpegFormat = inputFormat || 'yuv420p';
-    this._ffmpeg = this._createEncoderProcess(ffmpegFormat);
-    this._backendName = this._ffmpeg instanceof NodeAvVideoEncoder ? 'node-av' : 'ffmpeg';
+    const pixFormat = inputFormat || 'yuv420p';
+    this._encoder = new NodeAvVideoEncoder();
 
-    const hardwareArgs = this._getHardwareEncoderArgs();
-
-    this._ffmpeg.startEncoder({
+    this._encoder.startEncoder({
       codec: this._config.codec,
       width: this._config.width,
       height: this._config.height,
-      inputPixelFormat: ffmpegFormat,
+      inputPixelFormat: pixFormat,
       framerate: this._config.framerate,
       bitrate: this._config.bitrate,
       bitrateMode: this._config.bitrateMode,
       latencyMode: this._config.latencyMode,
       alpha: this._config.alpha,
-      hardwareEncoderArgs: hardwareArgs ?? undefined,
+      hardwareAcceleration: this._hardwarePreference,
     });
 
-    this._ffmpeg.on('encodedFrame', (frame: { data: Buffer; timestamp: number; keyFrame: boolean }) => {
+    this._encoder.on('encodedFrame', (frame: { data: Buffer; timestamp: number; keyFrame: boolean }) => {
       this._handleEncodedFrame(frame);
     });
 
-    this._ffmpeg.on('data', (data: Buffer) => {
-      this._handleEncodedData(data);
-    });
-
-    this._ffmpeg.on('error', (err: Error) => {
+    this._encoder.on('error', (err: Error) => {
       this._safeErrorCallback(err);
     });
   }
 
-  private _stopFFmpeg(): void {
-    if (this._ffmpeg) {
-      this._ffmpeg.kill();
-      this._ffmpeg = null;
+  private _stopEncoder(): void {
+    if (this._encoder) {
+      this._encoder.kill();
+      this._encoder = null;
     }
-  }
-
-  private _createEncoderProcess(pixelFormat: string): FFmpegProcess | NodeAvVideoEncoder {
-    const requestedBackend = this._config?.backend ?? process.env.WEBCODECS_BACKEND ?? 'node-av';
-
-    // Use node-av for all codecs unless explicitly requesting ffmpeg
-    if (requestedBackend !== 'ffmpeg' && this._canUseNodeAv(pixelFormat)) {
-      try {
-        return new NodeAvVideoEncoder();
-      } catch {
-        // Fall through to ffmpeg CLI
-      }
-    }
-    return new FFmpegProcess();
-  }
-
-  private _canUseNodeAv(_pixelFormat: string): boolean {
-    return true;
-  }
-
-  private _selectHardwareEncoder(codec: string): {
-    encoder: string;
-    hwaccel: HardwareAccelerationMethod | null;
-    isHardware: boolean;
-  } | null {
-    const codecName = parseCodecString(codec);
-    if (!codecName) {
-      return null;
-    }
-
-    try {
-      const selection = getBestEncoderSync(codecName, 'prefer-hardware');
-      return selection.isHardware ? selection : null;
-    } catch {
-      return null;
-    }
-  }
-
-  private _getHardwareEncoderArgs(): string[] | null {
-    if (!this._config) return null;
-    if (this._hardwarePreference !== 'prefer-hardware') return null;
-    if (!this._hardwareEncoderSelection?.isHardware) return null;
-
-    try {
-      return getEncoderArgs(
-        this._hardwareEncoderSelection.encoder,
-        this._hardwareEncoderSelection.hwaccel,
-        this._buildHardwareEncoderOptions()
-      );
-    } catch {
-      this._hardwareEncoderSelection = null;
-      return null;
-    }
-  }
-
-  private _buildHardwareEncoderOptions(): { bitrate?: number; quality?: number; preset?: string } {
-    if (!this._config) {
-      return {};
-    }
-
-    const options: { bitrate?: number; quality?: number; preset?: string } = {};
-
-    if (this._config.bitrate) {
-      options.bitrate = this._config.bitrate;
-    }
-
-    if (this._config.bitrateMode === 'quantizer') {
-      options.quality = 23;
-    }
-
-    if (this._config.latencyMode === 'realtime') {
-      options.preset = 'p1';
-    }
-
-    return options;
   }
 
   private _handleEncodedFrame(frame: { data: Buffer; timestamp: number; keyFrame: boolean }): void {
@@ -471,69 +345,4 @@ export class VideoEncoder extends EventEmitter {
     this._safeOutputCallback(chunk, metadata);
   }
 
-  private _handleEncodedData(data: Buffer): void {
-    this._encodedBuffer = Buffer.concat([this._encodedBuffer, data]);
-
-    if (this._encodedBuffer.length > 4096) {
-      this._emitEncodedChunk(this._encodedBuffer);
-      this._encodedBuffer = Buffer.alloc(0);
-    }
-  }
-
-  private _emitEncodedChunk(data: Buffer): void {
-    if (!this._config || data.length === 0) return;
-
-    const frameInfo = this._pendingFrames.shift();
-    const timestamp = frameInfo?.timestamp ?? 0;
-    const duration = frameInfo?.duration ?? undefined;
-    const isKeyFrame = frameInfo?.keyFrame ?? this._firstChunk;
-
-    let payload: Buffer = data;
-    const codecBase = this._config.codec.split('.')[0].toLowerCase();
-
-    if (this._bitstreamFormat === 'mp4') {
-      const view = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-      if (codecBase === 'avc1' || codecBase === 'avc3') {
-        if (!this._codecDescription) {
-          const { sps, pps } = extractAvcParameterSetsFromAnnexB(view);
-          if (sps.length && pps.length) {
-            this._codecDescription = buildAvcDecoderConfig(sps, pps);
-          }
-        }
-        payload = convertAnnexBToAvcc(view);
-      } else if (codecBase === 'hev1' || codecBase === 'hvc1') {
-        if (!this._codecDescription) {
-          const { vps, sps, pps } = extractHevcParameterSetsFromAnnexB(view);
-          if (sps.length && pps.length) {
-            this._codecDescription = buildHvccDecoderConfig(vps, sps, pps);
-          }
-        }
-        payload = convertAnnexBToHvcc(view);
-      }
-    }
-
-    const chunk = new EncodedVideoChunk({
-      type: isKeyFrame ? 'key' : 'delta' as EncodedVideoChunkType,
-      timestamp,
-      duration,
-      data: new Uint8Array(payload),
-    });
-
-    this._encodeQueueSize = Math.max(0, this._encodeQueueSize - 1);
-    this.emit('dequeue');
-
-    const metadata: VideoEncoderOutputMetadata | undefined = this._firstChunk
-      ? {
-          decoderConfig: {
-            codec: this._config.codec,
-            codedWidth: this._config.width,
-            codedHeight: this._config.height,
-            description: this._codecDescription ?? undefined,
-          },
-        }
-      : undefined;
-
-    this._firstChunk = false;
-    this._safeOutputCallback(chunk, metadata);
-  }
 }
