@@ -55,9 +55,9 @@ const MIME_TO_CODEC_ID: Record<string, AVCodecID> = {
   'image/avif': AV_CODEC_ID_AV1,
 };
 
-// Formats that require Demuxer for proper multi-frame decoding
+// Formats that require Demuxer for proper decoding (container formats)
 // Note: WebP is excluded because FFmpeg's webp demuxer doesn't support ANIM/ANMF
-const DEMUXER_FORMATS = ['image/gif', 'image/apng'];
+const DEMUXER_FORMATS = ['image/gif', 'image/apng', 'image/avif'];
 
 /**
  * Decode images using node-av native bindings

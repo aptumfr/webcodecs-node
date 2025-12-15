@@ -3,13 +3,11 @@
  * https://developer.mozilla.org/en-US/docs/Web/API/ImageDecoder
  */
 
-import { spawn } from 'child_process';
 import { VideoFrame } from '../core/VideoFrame.js';
 import { DOMException } from '../types/index.js';
 import { createLogger } from '../utils/index.js';
-import { parseWebPHeader } from '../formats/index.js';
 import type { VideoColorSpaceInit } from '../formats/index.js';
-import { NodeAvImageDecoder, probeImageDimensions } from '../node-av/NodeAvImageDecoder.js';
+import { NodeAvImageDecoder } from '../node-av/NodeAvImageDecoder.js';
 
 const logger = createLogger('ImageDecoder');
 
@@ -109,20 +107,8 @@ export class ImageTrackList {
   }
 }
 
-// MIME type to FFmpeg format mapping
-const MIME_TO_CODEC: Record<string, { format: string; decoder?: string; autoDetect?: boolean }> = {
-  'image/png': { format: 'png_pipe' },
-  'image/apng': { format: 'apng' },
-  'image/jpeg': { format: 'jpeg_pipe' },
-  'image/jpg': { format: 'jpeg_pipe' },
-  'image/webp': { format: 'webp_pipe', autoDetect: true },
-  'image/gif': { format: 'gif' },
-  'image/bmp': { format: 'bmp_pipe' },
-  'image/avif': { format: 'avif', autoDetect: true },
-  'image/tiff': { format: 'tiff_pipe' },
-};
-
-const SUPPORTED_TYPES = new Set(Object.keys(MIME_TO_CODEC));
+// Supported image types (delegated to node-av)
+const ANIMATED_FORMATS = ['image/gif', 'image/apng', 'image/webp'];
 
 function isReadableStream(obj: unknown): obj is ReadableStream {
   return typeof obj === 'object' && obj !== null && typeof (obj as ReadableStream).getReader === 'function';
@@ -160,7 +146,6 @@ export class ImageDecoder {
   }> = [];
   private _framesParsed: boolean = false;
   private _repetitionCount: number = 0;
-  private _frameDurations: number[] = [];
 
   constructor(init: ImageDecoderInit) {
     if (!init || typeof init !== 'object') {
@@ -258,12 +243,14 @@ export class ImageDecoder {
   private async _parseImage(): Promise<void> {
     if (!this._data || this._framesParsed) return;
 
-    const codecInfo = MIME_TO_CODEC[this._type.toLowerCase()];
-    if (!codecInfo) {
+    if (!NodeAvImageDecoder.isTypeSupported(this._type)) {
       throw new DOMException(`Unsupported image type: ${this._type}`, 'NotSupportedError');
     }
 
-    await this._probeAnimationMetadata();
+    // Set default repetition count (GIF loops forever by default)
+    const type = this._type.toLowerCase();
+    this._repetitionCount = type === 'image/gif' ? Infinity : 1;
+
     await this._decodeAllFramesDirect();
 
     this._framesParsed = true;
@@ -276,65 +263,6 @@ export class ImageDecoder {
       selected: true,
     });
     this._tracks._addTrack(track);
-  }
-
-  private async _probeAnimationMetadata(): Promise<void> {
-    if (!this._data) return;
-
-    const codecInfo = MIME_TO_CODEC[this._type.toLowerCase()];
-    const isAnimatedFormat = ['image/gif', 'image/apng', 'image/webp'].includes(this._type.toLowerCase());
-
-    if (!isAnimatedFormat) return;
-
-    return new Promise((resolve) => {
-      const args = [
-        '-hide_banner', '-v', 'error',
-        '-select_streams', 'v:0',
-        '-show_entries', 'frame=pkt_duration_time,pkt_pts_time',
-        '-show_entries', 'format_tags=loop',
-        '-show_entries', 'stream_tags=loop',
-        '-of', 'json',
-      ];
-
-      if (!codecInfo.autoDetect) {
-        args.push('-f', codecInfo.format);
-      }
-      args.push('pipe:0');
-
-      const process = spawn('ffprobe', args, { stdio: ['pipe', 'pipe', 'pipe'] });
-      let stdout = '';
-
-      process.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
-      process.stderr?.on('data', () => {});
-
-      process.on('close', () => {
-        try {
-          const info = JSON.parse(stdout);
-          const loopValue = info.format?.tags?.loop ?? info.streams?.[0]?.tags?.loop;
-
-          if (loopValue !== undefined) {
-            const loopNum = parseInt(loopValue, 10);
-            this._repetitionCount = loopNum === 0 ? Infinity : loopNum;
-          } else {
-            this._repetitionCount = this._type.toLowerCase() === 'image/gif' ? Infinity : 1;
-          }
-
-          if (info.frames && Array.isArray(info.frames)) {
-            for (const frame of info.frames) {
-              const durationSec = parseFloat(frame.pkt_duration_time || '0.1');
-              this._frameDurations.push(Math.round(durationSec * 1_000_000));
-            }
-          }
-        } catch {
-          this._repetitionCount = this._type.toLowerCase() === 'image/gif' ? Infinity : 1;
-        }
-        resolve();
-      });
-
-      process.stdin?.on('error', () => {});
-      process.stdin?.write(Buffer.from(this._data!.buffer, this._data!.byteOffset, this._data!.byteLength));
-      process.stdin?.end();
-    });
   }
 
   private _frameTypeSupportsAlpha(): boolean {
@@ -640,188 +568,13 @@ export class ImageDecoder {
   private async _decodeAllFramesDirect(): Promise<void> {
     if (!this._data) return;
 
-    // Use node-av for all supported formats
+    // Decode using node-av
     // Note: Animated WebP has limited support (FFmpeg webp demuxer skips ANIM/ANMF chunks)
-    // but there's no better alternative - FFmpeg CLI has the same limitation
-    if (NodeAvImageDecoder.isTypeSupported(this._type)) {
-      try {
-        await this._decodeWithNodeAv();
-        if (this._frames.length > 0) {
-          return;
-        }
-      } catch (err) {
-        logger.warn('node-av decode failed, falling back to FFmpeg CLI', { error: err });
-      }
+    await this._decodeWithNodeAv();
+
+    if (this._frames.length === 0) {
+      throw new Error('No frames decoded');
     }
-
-    const codecInfo = MIME_TO_CODEC[this._type.toLowerCase()];
-    const dimensions = await this._probeDimensions();
-
-    if (dimensions.width === 0 || dimensions.height === 0) {
-      throw new Error(`Could not determine image dimensions for ${this._type}`);
-    }
-
-    const args = ['-hide_banner', '-loglevel', 'error', '-noautorotate'];
-
-    if (!codecInfo.autoDetect) {
-      args.push('-f', codecInfo.format);
-    }
-
-    args.push('-i', 'pipe:0');
-
-    if (this._desiredWidth || this._desiredHeight) {
-      args.push('-vf', `scale=${this._desiredWidth || -1}:${this._desiredHeight || -1}`);
-    }
-
-    args.push('-f', 'rawvideo', '-pix_fmt', 'rgba', 'pipe:1');
-
-    const width = this._desiredWidth || dimensions.width;
-    const height = this._desiredHeight || dimensions.height;
-    const frameSize = width * height * 4;
-
-    if (frameSize === 0) {
-      throw new Error('Failed to determine frame size');
-    }
-
-    const defaultDuration = 100000;
-    const hasFrameDurations = this._frameDurations.length > 0;
-
-    return new Promise((resolve, reject) => {
-      const process = spawn('ffmpeg', args, { stdio: ['pipe', 'pipe', 'pipe'] });
-      let buffer = Buffer.alloc(0);
-      let timestamp = 0;
-      let frameIndex = 0;
-
-      const emitFrameFromBuffer = (frameBuffer: Buffer): void => {
-        const treatAsAnimated = hasFrameDurations || frameIndex > 0;
-        const duration = treatAsAnimated
-          ? (this._frameDurations[frameIndex] ?? defaultDuration)
-          : 0;
-        const frameTimestamp = timestamp;
-        timestamp += duration;
-
-        const frameBytes = new Uint8Array(frameBuffer);
-        const processed = this._processFrameData(frameBytes);
-        const oriented = this._applyOrientation(processed, width, height);
-        this._frames.push({
-          data: oriented.data,
-          width: oriented.width,
-          height: oriented.height,
-          timestamp: frameTimestamp,
-          duration,
-          complete: true,
-          colorSpace: this._preferredColorSpace,
-        });
-        frameIndex++;
-      };
-
-      process.stdout?.on('data', (data: Buffer) => {
-        if (!data || data.length === 0) {
-          return;
-        }
-        buffer = buffer.length === 0 ? Buffer.from(data) : Buffer.concat([buffer, data]);
-        while (buffer.length >= frameSize) {
-          const frameChunk = buffer.subarray(0, frameSize);
-          emitFrameFromBuffer(frameChunk);
-          buffer = buffer.subarray(frameSize);
-        }
-      });
-
-      process.stderr?.on('data', (data: Buffer) => {
-        const msg = data.toString();
-        if (msg.toLowerCase().includes('error') && !msg.includes('Invalid data')) {
-          logger.warn('FFmpeg stderr', { message: msg });
-        }
-      });
-
-      process.on('close', (code) => {
-        buffer = Buffer.alloc(0);
-
-        if (code !== 0 && this._frames.length === 0) {
-          reject(new Error(`FFmpeg failed with code ${code}`));
-          return;
-        }
-
-        if (this._frames.length === 0) {
-          reject(new Error('No frames decoded'));
-        } else {
-          resolve();
-        }
-      });
-
-      process.stdin?.on('error', () => {});
-      process.stdin?.write(this._data);
-      process.stdin?.end();
-    });
-  }
-
-  private async _probeDimensions(): Promise<{ width: number; height: number }> {
-    if (!this._data) return { width: 0, height: 0 };
-
-    // For WebP, try native header parsing first
-    if (this._type.toLowerCase() === 'image/webp') {
-      const webpInfo = parseWebPHeader(this._data);
-      if (webpInfo && webpInfo.width > 0 && webpInfo.height > 0) {
-        return { width: webpInfo.width, height: webpInfo.height };
-      }
-    }
-
-    // Try node-av probing first
-    if (NodeAvImageDecoder.isTypeSupported(this._type)) {
-      try {
-        const dims = await probeImageDimensions(this._data, this._type);
-        if (dims.width > 0 && dims.height > 0) {
-          return dims;
-        }
-      } catch {
-        // Fall through to FFmpeg probing
-      }
-    }
-
-    const codecInfo = MIME_TO_CODEC[this._type.toLowerCase()];
-    const tryAutoDetect = codecInfo.autoDetect;
-
-    const attemptProbe = (useFormat: boolean): Promise<{ width: number; height: number }> => {
-      return new Promise((resolve) => {
-        const args = ['-hide_banner'];
-
-        if (useFormat && !tryAutoDetect) {
-          args.push('-f', codecInfo.format);
-        }
-
-        args.push('-i', 'pipe:0', '-frames:v', '1', '-f', 'null', '-');
-
-        const process = spawn('ffmpeg', args, { stdio: ['pipe', 'pipe', 'pipe'] });
-        let stderr = '';
-
-        process.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
-
-        process.on('close', () => {
-          const match = stderr.match(/\b(\d{2,5})x(\d{2,5})\b/);
-          if (match) {
-            resolve({ width: parseInt(match[1], 10), height: parseInt(match[2], 10) });
-          } else {
-            resolve({ width: 0, height: 0 });
-          }
-        });
-
-        process.stdin?.on('error', () => {});
-        process.stdin?.write(Buffer.from(this._data!.buffer, this._data!.byteOffset, this._data!.byteLength));
-        process.stdin?.end();
-      });
-    };
-
-    let result = await attemptProbe(!tryAutoDetect);
-
-    if ((result.width === 0 || result.height === 0) && tryAutoDetect) {
-      result = await attemptProbe(true);
-    }
-
-    if ((result.width === 0 || result.height === 0) && !tryAutoDetect) {
-      result = await attemptProbe(false);
-    }
-
-    return result;
   }
 
   get complete(): boolean { return this._complete; }
@@ -830,7 +583,7 @@ export class ImageDecoder {
   get type(): string { return this._type; }
 
   static async isTypeSupported(type: string): Promise<boolean> {
-    return SUPPORTED_TYPES.has(type.toLowerCase());
+    return NodeAvImageDecoder.isTypeSupported(type);
   }
 
   async decode(options?: ImageDecodeOptions): Promise<ImageDecodeResult> {
@@ -886,7 +639,6 @@ export class ImageDecoder {
     this._frames = [];
     this._framesParsed = false;
     this._repetitionCount = 0;
-    this._frameDurations = [];
     this._visibleFrameCount = 0;
     this._visibleAnimated = false;
     this._visibleRepetitionCount = 1;
