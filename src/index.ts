@@ -85,9 +85,7 @@ export type {
   PremultiplyAlpha,
 } from './decoders/ImageDecoder.js';
 
-// FFmpeg utilities (for advanced use)
-export { FFmpegProcess } from './ffmpeg/index.js';
-export type { FFmpegConfig, FFmpegInputConfig, FFmpegOutputConfig } from './ffmpeg/index.js';
+// FFmpeg utilities (for format conversion)
 export {
   pixelFormatToFFmpeg,
   ffmpegToPixelFormat,

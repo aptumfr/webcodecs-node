@@ -1,13 +1,9 @@
 /**
  * FFmpeg utilities
+ *
+ * Note: FFmpegProcess has been removed in favor of node-av native bindings.
+ * Use NodeAvVideoEncoder/NodeAvVideoDecoder for encoding/decoding.
  */
-
-export {
-  FFmpegProcess,
-  type FFmpegConfig,
-  type FFmpegInputConfig,
-  type FFmpegOutputConfig,
-} from './FFmpegProcess.js';
 
 // Types
 export {
@@ -46,6 +42,3 @@ export {
   getAudioOutputFormatSettings,
   type AudioFormatSettings,
 } from './audio-codecs.js';
-
-// Parsers
-export * from './parsers/index.js';
