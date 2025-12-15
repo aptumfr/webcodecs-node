@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { ImageDecoder } from '../ImageDecoder.js';
+import { ImageDecoder } from '../decoders/ImageDecoder.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';

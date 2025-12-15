@@ -10,7 +10,7 @@ import {
   getBestEncoder,
   getBestDecoder,
   testEncoder,
-} from '../HardwareAcceleration.js';
+} from '../hardware/HardwareAcceleration.js';
 
 async function main() {
   console.log('╔═══════════════════════════════════════════════════════════════╗');

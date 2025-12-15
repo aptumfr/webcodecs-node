@@ -2,7 +2,10 @@
  * Tests for VideoFrame class
  */
 
-import { VideoFrame, VideoColorSpace, DOMRectReadOnly } from '../VideoFrame.js';
+import { describe, it, expect } from 'vitest';
+import { VideoFrame } from '../core/VideoFrame.js';
+import { VideoColorSpace } from '../formats/color-space.js';
+import { DOMRectReadOnly } from '../types/geometry.js';
 
 describe('VideoFrame', () => {
   describe('constructor with BufferSource', () => {

@@ -2,7 +2,8 @@
  * Tests for AudioData class
  */
 
-import { AudioData } from '../AudioData.js';
+import { describe, it, expect } from 'vitest';
+import { AudioData } from '../core/AudioData.js';
 
 describe('AudioData', () => {
   describe('constructor', () => {

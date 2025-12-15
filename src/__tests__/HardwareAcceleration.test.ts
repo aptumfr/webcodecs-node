@@ -2,13 +2,14 @@
  * Tests for HardwareAcceleration module
  */
 
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
   detectHardwareAcceleration,
   getBestEncoder,
   getBestDecoder,
   parseCodecString,
   clearCapabilitiesCache,
-} from '../HardwareAcceleration.js';
+} from '../hardware/HardwareAcceleration.js';
 
 describe('HardwareAcceleration', () => {
   beforeEach(() => {

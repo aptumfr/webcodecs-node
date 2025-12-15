@@ -113,7 +113,7 @@ export type {
 } from './hardware/index.js';
 
 // MediaCapabilities API
-export { MediaCapabilities, mediaCapabilities } from './MediaCapabilities.js';
+export { MediaCapabilities, mediaCapabilities } from './capabilities/index.js';
 export type {
   VideoConfiguration,
   AudioConfiguration,
@@ -122,7 +122,7 @@ export type {
   MediaCapabilitiesInfo,
   MediaCapabilitiesDecodingInfo,
   MediaCapabilitiesEncodingInfo,
-} from './MediaCapabilities.js';
+} from './capabilities/index.js';
 
 // Utilities
 export { Logger, createLogger, setDebugMode, isDebugMode } from './utils/index.js';

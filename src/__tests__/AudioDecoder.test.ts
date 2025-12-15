@@ -2,11 +2,11 @@
  * Tests for AudioDecoder class
  */
 
-import { jest } from '@jest/globals';
-import { AudioDecoder } from '../AudioDecoder.js';
-import { AudioEncoder } from '../AudioEncoder.js';
-import { AudioData, AudioSampleFormat } from '../AudioData.js';
-import { EncodedAudioChunk } from '../EncodedAudioChunk.js';
+import { describe, it, expect, vi } from 'vitest';
+import { AudioDecoder } from '../decoders/AudioDecoder.js';
+import { AudioEncoder } from '../encoders/AudioEncoder.js';
+import { AudioData, AudioSampleFormat } from '../core/AudioData.js';
+import { EncodedAudioChunk } from '../core/EncodedAudioChunk.js';
 
 describe('AudioDecoder', () => {
   describe('isConfigSupported', () => {

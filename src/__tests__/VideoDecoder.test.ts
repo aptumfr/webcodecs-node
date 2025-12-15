@@ -2,11 +2,11 @@
  * Tests for VideoDecoder class
  */
 
-import { jest } from '@jest/globals';
-import { VideoDecoder } from '../VideoDecoder.js';
-import { VideoEncoder } from '../VideoEncoder.js';
-import { VideoFrame } from '../VideoFrame.js';
-import { EncodedVideoChunk } from '../EncodedVideoChunk.js';
+import { describe, it, expect, vi } from 'vitest';
+import { VideoDecoder } from '../decoders/VideoDecoder.js';
+import { VideoEncoder } from '../encoders/VideoEncoder.js';
+import { VideoFrame } from '../core/VideoFrame.js';
+import { EncodedVideoChunk } from '../core/EncodedVideoChunk.js';
 
 describe('VideoDecoder', () => {
   describe('isConfigSupported', () => {

@@ -14,15 +14,17 @@
  *   const encoder = new VideoEncoder({ ... });
  */
 
-import { VideoFrame, VideoColorSpace, DOMRectReadOnly } from './VideoFrame.js';
-import { EncodedVideoChunk } from './EncodedVideoChunk.js';
-import { VideoEncoder } from './VideoEncoder.js';
-import { VideoDecoder } from './VideoDecoder.js';
-import { AudioData } from './AudioData.js';
-import { EncodedAudioChunk } from './EncodedAudioChunk.js';
-import { AudioEncoder } from './AudioEncoder.js';
-import { AudioDecoder } from './AudioDecoder.js';
-import { ImageDecoder } from './ImageDecoder.js';
+import { VideoFrame } from './core/VideoFrame.js';
+import { VideoColorSpace } from './formats/color-space.js';
+import { DOMRectReadOnly } from './types/geometry.js';
+import { EncodedVideoChunk } from './core/EncodedVideoChunk.js';
+import { VideoEncoder } from './encoders/VideoEncoder.js';
+import { VideoDecoder } from './decoders/VideoDecoder.js';
+import { AudioData } from './core/AudioData.js';
+import { EncodedAudioChunk } from './core/EncodedAudioChunk.js';
+import { AudioEncoder } from './encoders/AudioEncoder.js';
+import { AudioDecoder } from './decoders/AudioDecoder.js';
+import { ImageDecoder } from './decoders/ImageDecoder.js';
 import { installOffscreenCanvasPolyfill } from './polyfills/OffscreenCanvas.js';
 
 /**

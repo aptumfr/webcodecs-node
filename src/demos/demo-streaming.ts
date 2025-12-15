@@ -5,14 +5,14 @@
  * with frames emitted as soon as they're ready (not buffered until end).
  */
 
-import { VideoEncoder } from '../VideoEncoder.js';
-import { VideoDecoder } from '../VideoDecoder.js';
-import { VideoFrame } from '../VideoFrame.js';
-import { EncodedVideoChunk } from '../EncodedVideoChunk.js';
-import { AudioEncoder } from '../AudioEncoder.js';
-import { AudioDecoder } from '../AudioDecoder.js';
-import { AudioData } from '../AudioData.js';
-import { EncodedAudioChunk } from '../EncodedAudioChunk.js';
+import { VideoEncoder } from '../encoders/VideoEncoder.js';
+import { VideoDecoder } from '../decoders/VideoDecoder.js';
+import { VideoFrame } from '../core/VideoFrame.js';
+import { EncodedVideoChunk } from '../core/EncodedVideoChunk.js';
+import { AudioEncoder } from '../encoders/AudioEncoder.js';
+import { AudioDecoder } from '../decoders/AudioDecoder.js';
+import { AudioData } from '../core/AudioData.js';
+import { EncodedAudioChunk } from '../core/EncodedAudioChunk.js';
 
 const WIDTH = 320;
 const HEIGHT = 240;

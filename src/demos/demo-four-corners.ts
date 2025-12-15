@@ -7,10 +7,10 @@ import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { VideoDecoder } from '../VideoDecoder.js';
-import { VideoEncoder } from '../VideoEncoder.js';
-import { EncodedVideoChunk } from '../EncodedVideoChunk.js';
-import { VideoFrame } from '../VideoFrame.js';
+import { VideoDecoder } from '../decoders/VideoDecoder.js';
+import { VideoEncoder } from '../encoders/VideoEncoder.js';
+import { EncodedVideoChunk } from '../core/EncodedVideoChunk.js';
+import { VideoFrame } from '../core/VideoFrame.js';
 
 const MEDIA_FILE = path.resolve('media/Big_Buck_Bunny_360_10s_1MB.mp4');
 const OUTPUT_DIR = path.resolve('media', 'four-corners-demo');

@@ -41,7 +41,7 @@ import { FFmpegVideoDecoder } from '../mediabunny/FFmpegVideoDecoder.js';
 import { FFmpegAudioEncoder } from '../mediabunny/FFmpegAudioEncoder.js';
 import { FFmpegAudioDecoder } from '../mediabunny/FFmpegAudioDecoder.js';
 
-import { getHardwareAccelerationSummary, getBestEncoder, testEncoder } from '../HardwareAcceleration.js';
+import { getHardwareAccelerationSummary, getBestEncoder, testEncoder } from '../hardware/HardwareAcceleration.js';
 
 const OUTPUT_DIR = '/tmp/webcodecs-test-hwaccel';
 

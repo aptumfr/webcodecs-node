@@ -9,12 +9,12 @@
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { VideoDecoder, VideoDecoderConfig } from '../VideoDecoder.js';
-import { AudioDecoder, AudioDecoderConfig } from '../AudioDecoder.js';
-import { EncodedVideoChunk } from '../EncodedVideoChunk.js';
-import { EncodedAudioChunk } from '../EncodedAudioChunk.js';
-import { VideoFrame } from '../VideoFrame.js';
-import { AudioData } from '../AudioData.js';
+import { VideoDecoder, VideoDecoderConfig } from '../decoders/VideoDecoder.js';
+import { AudioDecoder, AudioDecoderConfig } from '../decoders/AudioDecoder.js';
+import { EncodedVideoChunk } from '../core/EncodedVideoChunk.js';
+import { EncodedAudioChunk } from '../core/EncodedAudioChunk.js';
+import { VideoFrame } from '../core/VideoFrame.js';
+import { AudioData } from '../core/AudioData.js';
 
 const SAMPLES_DIR = '/tmp/webcodecs-test-samples';
 
