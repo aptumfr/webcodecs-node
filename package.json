@@ -1,6 +1,6 @@
 {
   "name": "webcodecs-node",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "WebCodecs API implementation for Node.js using FFmpeg",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,25 +10,13 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./mediabunny/FFmpegVideoEncoder": {
-      "types": "./dist/mediabunny/FFmpegVideoEncoder.d.ts",
-      "import": "./dist/mediabunny/FFmpegVideoEncoder.js"
-    },
-    "./mediabunny/FFmpegVideoDecoder": {
-      "types": "./dist/mediabunny/FFmpegVideoDecoder.d.ts",
-      "import": "./dist/mediabunny/FFmpegVideoDecoder.js"
-    },
-    "./mediabunny/FFmpegAudioEncoder": {
-      "types": "./dist/mediabunny/FFmpegAudioEncoder.d.ts",
-      "import": "./dist/mediabunny/FFmpegAudioEncoder.js"
-    },
-    "./mediabunny/FFmpegAudioDecoder": {
-      "types": "./dist/mediabunny/FFmpegAudioDecoder.d.ts",
-      "import": "./dist/mediabunny/FFmpegAudioDecoder.js"
-    },
     "./polyfill": {
       "types": "./dist/polyfill.d.ts",
       "import": "./dist/polyfill.js"
+    },
+    "./containers": {
+      "types": "./dist/containers/index.d.ts",
+      "import": "./dist/containers/index.js"
     }
   },
   "files": [
@@ -43,15 +31,14 @@
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "capabilities:generate": "npm run build && node dist/tools/generate-capabilities-profile.js",
     "demo": "node dist/demos/demo.js",
-    "demo:mediabunny": "node dist/demos/demo-mediabunny.js",
     "demo:image": "node dist/demos/demo-image.js",
-    "demo:conversion": "node dist/demos/demo-conversion.js",
     "demo:webcodecs": "node dist/demos/demo-webcodecs.js",
     "demo:hwaccel": "node dist/demos/demo-hwaccel.js",
-    "demo:hwaccel-conversion": "node dist/demos/demo-hwaccel-conversion.js",
     "demo:streaming": "node dist/demos/demo-streaming.js",
     "demo:samples": "node dist/demos/demo-samples.js",
-    "demo:fourcorners": "node dist/demos/demo-four-corners.js"
+    "demo:fourcorners": "node dist/demos/demo-four-corners.js",
+    "demo:containers": "node dist/demos/demo-containers.js",
+    "demo:1080p": "node dist/demos/demo-1080p-transcode.js"
   },
   "keywords": [
     "webcodecs",
@@ -60,7 +47,6 @@
     "encoder",
     "decoder",
     "ffmpeg",
-    "mediabunny",
     "node",
     "h264",
     "hevc",
@@ -70,7 +56,10 @@
     "aac",
     "hardware-acceleration",
     "vaapi",
-    "nvenc"
+    "nvenc",
+    "transcode",
+    "demux",
+    "mux"
   ],
   "author": "Mohamed Ikbel Boulabiar boulabiar@gmail.com",
   "license": "AGPL-3.0-only",
@@ -83,19 +72,8 @@
   },
   "homepage": "",
   "dependencies": {
-    "codex": "^0.2.3",
-    "mediabunny": ">=1.25.0",
     "node-av": "^5.0.2",
-    "sharp": "^0.32.6",
-    "webgpu": "^0.3.8"
-  },
-  "peerDependencies": {
-    "mediabunny": ">=1.25.0"
-  },
-  "peerDependenciesMeta": {
-    "mediabunny": {
-      "optional": true
-    }
+    "sharp": "^0.32.6"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",

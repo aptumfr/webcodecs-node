@@ -1,11 +1,11 @@
 /**
- * FFmpeg format mappings
+ * Codec format mappings
  *
- * Converts between WebCodecs formats and FFmpeg formats
+ * Converts between WebCodecs formats and libav formats used by node-av.
  */
 
 /**
- * Map WebCodecs pixel format to FFmpeg pixel format
+ * Map WebCodecs pixel format to libav pixel format
  */
 export function pixelFormatToFFmpeg(format: string): string {
   const formatMap: Record<string, string> = {
@@ -23,7 +23,7 @@ export function pixelFormatToFFmpeg(format: string): string {
 }
 
 /**
- * Map FFmpeg pixel format to WebCodecs pixel format
+ * Map libav pixel format to WebCodecs pixel format
  */
 export function ffmpegToPixelFormat(format: string): string {
   const formatMap: Record<string, string> = {
@@ -41,7 +41,7 @@ export function ffmpegToPixelFormat(format: string): string {
 }
 
 /**
- * Map WebCodecs codec string to FFmpeg codec
+ * Map WebCodecs codec string to libav encoder codec
  */
 export function webCodecToFFmpegCodec(webCodec: string): string {
   const codecBase = webCodec.split('.')[0].toLowerCase();
@@ -122,7 +122,7 @@ export function calculateFrameSize(format: string, width: number, height: number
 }
 
 /**
- * MIME type to FFmpeg format mapping for ImageDecoder
+ * MIME type to format mapping for ImageDecoder
  */
 export const IMAGE_MIME_TO_FFMPEG: Record<string, { format: string; decoder?: string; autoDetect?: boolean }> = {
   'image/png': { format: 'png_pipe' },
@@ -151,7 +151,7 @@ export const AUDIO_CODEC_MAP: Record<string, string> = {
 };
 
 /**
- * Get FFmpeg audio codec from WebCodecs codec string
+ * Get libav audio codec from WebCodecs codec string
  */
 export function webCodecToFFmpegAudioCodec(codec: string): string {
   const codecLower = codec.toLowerCase();

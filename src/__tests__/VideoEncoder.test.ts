@@ -1,8 +1,7 @@
 /**
  * Tests for VideoEncoder class
  */
-
-import { describe, it, expect, vi } from 'vitest';
+import { jest } from '@jest/globals';
 import { VideoEncoder } from '../encoders/VideoEncoder.js';
 import { VideoFrame } from '../core/VideoFrame.js';
 import { EncodedVideoChunk } from '../core/EncodedVideoChunk.js';

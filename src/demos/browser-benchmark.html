@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebCodecs 1080p Transcode Benchmark - Chrome Native</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1a1a2e; color: #eee; }
+    .box { border: 1px solid #444; padding: 15px; margin: 10px 0; border-radius: 8px; }
+    h1 { color: #00d4ff; }
+    .result { color: #00ff88; }
+    .error { color: #ff4444; }
+    button { padding: 10px 20px; font-size: 16px; cursor: pointer; margin: 5px; }
+    #log { white-space: pre-wrap; background: #0a0a15; padding: 15px; border-radius: 8px; max-height: 400px; overflow-y: auto; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #444; padding: 8px; text-align: left; }
+    th { background: #2a2a4e; }
+  </style>
+</head>
+<body>
+  <h1>WebCodecs 1080p Transcode Benchmark</h1>
+  <p>Compare Chrome's native WebCodecs performance</p>
+
+  <div class="box">
+    <h3>Input Video</h3>
+    <input type="file" id="fileInput" accept="video/*">
+    <p>Or use URL: <input type="text" id="videoUrl" placeholder="http://localhost:8080/media/bbb_1080_30s.mp4" size="50"></p>
+    <button onclick="loadFromUrl()">Load from URL</button>
+  </div>
+
+  <div class="box">
+    <h3>Benchmark Controls</h3>
+    <button onclick="runBenchmark('software')">Run Software Encode (libx264 equivalent)</button>
+    <button onclick="runBenchmark('hardware')">Run Hardware Encode (if available)</button>
+  </div>
+
+  <div class="box">
+    <h3>Results</h3>
+    <table>
+      <thead>
+        <tr><th>Test</th><th>Frames</th><th>Time</th><th>FPS</th><th>Realtime Ratio</th></tr>
+      </thead>
+      <tbody id="results"></tbody>
+    </table>
+  </div>
+
+  <div class="box">
+    <h3>Log</h3>
+    <div id="log"></div>
+  </div>
+
+<script>
+const log = (msg) => {
+  const logEl = document.getElementById('log');
+  logEl.textContent += msg + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+  console.log(msg);
+};
+
+let videoFile = null;
+
+document.getElementById('fileInput').addEventListener('change', (e) => {
+  videoFile = e.target.files[0];
+  log(`Loaded file: ${videoFile.name} (${(videoFile.size / 1024 / 1024).toFixed(2)} MB)`);
+});
+
+async function loadFromUrl() {
+  const url = document.getElementById('videoUrl').value || 'media/bbb_1080_30s.mp4';
+  log(`Fetching ${url}...`);
+  try {
+    const response = await fetch(url);
+    const blob = await response.blob();
+    videoFile = new File([blob], 'video.mp4', { type: 'video/mp4' });
+    log(`Loaded: ${(videoFile.size / 1024 / 1024).toFixed(2)} MB`);
+  } catch (err) {
+    log(`Error loading URL: ${err.message}`);
+  }
+}
+
+async function runBenchmark(mode) {
+  if (!videoFile) {
+    log('Please load a video file first');
+    return;
+  }
+
+  log(`\n${'='.repeat(50)}`);
+  log(`Starting ${mode} encode benchmark...`);
+  log(`${'='.repeat(50)}`);
+
+  try {
+    // Check WebCodecs support
+    if (!('VideoDecoder' in window)) {
+      throw new Error('WebCodecs not supported in this browser');
+    }
+
+    const startTime = performance.now();
+    let decodedFrames = 0;
+    let encodedFrames = 0;
+    let totalDecodeTime = 0;
+    let totalEncodeTime = 0;
+
+    // Demux the video using MediaSource or manual parsing
+    const videoData = await videoFile.arrayBuffer();
+
+    // Use MP4Box.js or similar for demuxing (simplified approach using video element)
+    const videoUrl = URL.createObjectURL(videoFile);
+    const videoEl = document.createElement('video');
+    videoEl.src = videoUrl;
+    videoEl.muted = true;
+
+    await new Promise((resolve, reject) => {
+      videoEl.onloadedmetadata = resolve;
+      videoEl.onerror = reject;
+    });
+
+    const width = videoEl.videoWidth;
+    const height = videoEl.videoHeight;
+    const duration = videoEl.duration;
+    const fps = 30; // Assume 30fps
+    const expectedFrames = Math.floor(duration * fps);
+
+    log(`Video: ${width}x${height}, ${duration.toFixed(2)}s, ~${expectedFrames} frames`);
+
+    // Create encoder
+    const hardwareAcceleration = mode === 'hardware' ? 'prefer-hardware' : 'prefer-software';
+
+    const encoderConfig = {
+      codec: 'avc1.640028', // H.264 High Profile Level 4.0
+      width,
+      height,
+      bitrate: 4_000_000,
+      framerate: fps,
+      hardwareAcceleration,
+      avc: { format: 'annexb' }
+    };
+
+    // Check encoder support
+    const support = await VideoEncoder.isConfigSupported(encoderConfig);
+    if (!support.supported) {
+      throw new Error(`Encoder config not supported: ${JSON.stringify(encoderConfig)}`);
+    }
+    log(`Encoder config supported (${hardwareAcceleration})`);
+
+    const encodedChunks = [];
+    const encoder = new VideoEncoder({
+      output: (chunk, meta) => {
+        encodedChunks.push({ chunk, meta });
+        encodedFrames++;
+      },
+      error: (e) => log(`Encoder error: ${e.message}`)
+    });
+
+    encoder.configure(encoderConfig);
+
+    // Use canvas + captureStream for frame extraction (alternative to demuxer)
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+
+    // Process frames by seeking through video
+    const frameInterval = 1 / fps;
+    let currentTime = 0;
+
+    log('Processing frames...');
+    const encodeStartTime = performance.now();
+
+    while (currentTime < duration) {
+      // Seek to frame
+      videoEl.currentTime = currentTime;
+      await new Promise(resolve => {
+        videoEl.onseeked = resolve;
+      });
+
+      // Draw frame to canvas
+      ctx.drawImage(videoEl, 0, 0);
+
+      // Create VideoFrame from canvas
+      const frame = new VideoFrame(canvas, {
+        timestamp: currentTime * 1_000_000, // microseconds
+        duration: frameInterval * 1_000_000
+      });
+
+      // Encode
+      const keyFrame = decodedFrames % 30 === 0;
+      encoder.encode(frame, { keyFrame });
+      frame.close();
+
+      decodedFrames++;
+      currentTime += frameInterval;
+
+      // Progress update
+      if (decodedFrames % 30 === 0) {
+        const progress = ((currentTime / duration) * 100).toFixed(1);
+        log(`Progress: ${progress}% (${decodedFrames} frames)`);
+      }
+    }
+
+    // Flush encoder
+    await encoder.flush();
+    encoder.close();
+
+    const totalTime = performance.now() - startTime;
+    const encodeTime = performance.now() - encodeStartTime;
+    const processingFps = decodedFrames / (totalTime / 1000);
+    const realtimeRatio = processingFps / fps;
+
+    // Calculate output size
+    let outputSize = 0;
+    for (const { chunk } of encodedChunks) {
+      outputSize += chunk.byteLength;
+    }
+
+    log(`\nResults:`);
+    log(`  Frames processed: ${decodedFrames}`);
+    log(`  Frames encoded: ${encodedFrames}`);
+    log(`  Output size: ${(outputSize / 1024 / 1024).toFixed(2)} MB`);
+    log(`  Total time: ${(totalTime / 1000).toFixed(2)}s`);
+    log(`  Processing speed: ${processingFps.toFixed(1)} fps`);
+    log(`  Realtime ratio: ${realtimeRatio.toFixed(2)}x`);
+
+    // Add to results table
+    const tbody = document.getElementById('results');
+    const row = document.createElement('tr');
+    row.innerHTML = `
+      <td>Chrome ${mode}</td>
+      <td>${encodedFrames}</td>
+      <td>${(totalTime / 1000).toFixed(2)}s</td>
+      <td class="result">${processingFps.toFixed(1)}</td>
+      <td class="result">${realtimeRatio.toFixed(2)}x</td>
+    `;
+    tbody.appendChild(row);
+
+    URL.revokeObjectURL(videoUrl);
+
+  } catch (err) {
+    log(`Error: ${err.message}`);
+    console.error(err);
+  }
+}
+
+// Check WebCodecs support on load
+window.onload = () => {
+  if ('VideoEncoder' in window) {
+    log('WebCodecs supported in this browser');
+    VideoEncoder.isConfigSupported({
+      codec: 'avc1.640028',
+      width: 1920,
+      height: 1080,
+      bitrate: 4_000_000
+    }).then(support => {
+      log(`H.264 encoding: ${support.supported ? 'supported' : 'not supported'}`);
+    });
+  } else {
+    log('WebCodecs NOT supported - use Chrome 94+ or Edge 94+');
+  }
+};
+</script>
+</body>
+</html>

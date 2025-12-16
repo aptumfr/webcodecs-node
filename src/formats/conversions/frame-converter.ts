@@ -7,6 +7,7 @@
 
 import { rgbaToYuv, yuvToRgba } from '../color-space.js';
 import { getPlaneInfo, isRgbFormat, isBgrFormat, type VideoPixelFormat } from '../pixel-formats.js';
+import { acquireBuffer, releaseBuffer } from '../../utils/buffer-pool.js';
 
 // Re-export VideoPixelFormat for backwards compatibility
 export type { VideoPixelFormat };
@@ -453,17 +454,22 @@ export function convertFrameFormat(
   } else if (srcIsRgb && !destIsRgb) {
     convertRgbToYuv(src, dest, destFormat, srcX, srcY, width, height);
   } else {
-    // YUV to YUV - convert via RGB
+    // YUV to YUV - convert via RGB using pooled buffer
     const rgbaSize = width * height * 4;
-    const rgbaBuffer = new Uint8Array(rgbaSize);
-    convertYuvToRgb(src, rgbaBuffer, 'RGBA', srcX, srcY, width, height);
+    const rgbaBuffer = acquireBuffer(rgbaSize);
+    try {
+      convertYuvToRgb(src, rgbaBuffer, 'RGBA', srcX, srcY, width, height);
 
-    const tempSrc: FrameBuffer = {
-      data: rgbaBuffer,
-      format: 'RGBA',
-      width,
-      height,
-    };
-    convertRgbToYuv(tempSrc, dest, destFormat, 0, 0, width, height);
+      const tempSrc: FrameBuffer = {
+        data: rgbaBuffer,
+        format: 'RGBA',
+        width,
+        height,
+      };
+      convertRgbToYuv(tempSrc, dest, destFormat, 0, 0, width, height);
+    } finally {
+      // Return buffer to pool for reuse
+      releaseBuffer(rgbaBuffer);
+    }
   }
 }

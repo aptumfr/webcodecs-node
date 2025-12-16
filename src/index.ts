@@ -2,7 +2,7 @@
  * WebCodecs API implementation for Node.js
  *
  * This module provides a Node.js implementation of the WebCodecs API
- * using FFmpeg as the underlying codec engine.
+ * using node-av (FFmpeg's libav* libraries) as the underlying codec engine.
  *
  * @see https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API
  */
@@ -85,14 +85,14 @@ export type {
   PremultiplyAlpha,
 } from './decoders/ImageDecoder.js';
 
-// FFmpeg utilities (for format conversion)
+// Codec utilities (for format conversion)
 export {
   pixelFormatToFFmpeg,
   ffmpegToPixelFormat,
   webCodecToFFmpegCodec,
   webCodecToContainerFormat,
   calculateFrameSize,
-} from './ffmpeg/index.js';
+} from './codec-utils/index.js';
 
 // Hardware acceleration
 export {

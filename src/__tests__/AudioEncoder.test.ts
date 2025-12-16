@@ -1,11 +1,12 @@
 /**
  * Tests for AudioEncoder class
  */
-
-import { describe, it, expect, vi } from 'vitest';
+import { jest } from '@jest/globals';
 import { AudioEncoder } from '../encoders/AudioEncoder.js';
 import { AudioData } from '../core/AudioData.js';
 import { EncodedAudioChunk } from '../core/EncodedAudioChunk.js';
+import { Frame, Rational } from 'node-av';
+import { AV_SAMPLE_FMT_FLT } from 'node-av/constants';
 
 describe('AudioEncoder', () => {
   describe('isConfigSupported', () => {
@@ -140,6 +141,68 @@ describe('AudioEncoder', () => {
 
       await encoder.flush();
       encoder.close();
+
+      expect(chunks.length).toBeGreaterThan(0);
+    }, 30000);
+
+    it('should encode native node-av frames without extra copy', async () => {
+      const chunks: EncodedAudioChunk[] = [];
+      let err: Error | null = null;
+
+      const encoder = new AudioEncoder({
+        output: (chunk) => chunks.push(chunk),
+        error: (e) => { err = e; },
+      });
+
+      const sampleRate = 48000;
+      const channels = 2;
+      const samples = 960;
+
+      encoder.configure({
+        codec: 'opus',
+        sampleRate,
+        numberOfChannels: channels,
+        bitrate: 128000,
+      });
+
+      const buffer = Buffer.alloc(samples * channels * 4);
+      const view = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4);
+      for (let i = 0; i < samples; i++) {
+        const t = i / sampleRate;
+        const sample = Math.sin(2 * Math.PI * 220 * t) * 0.25;
+        for (let ch = 0; ch < channels; ch++) {
+          view[i * channels + ch] = sample;
+        }
+      }
+
+      const frame = Frame.fromAudioBuffer(buffer, {
+        sampleRate,
+        channelLayout: { nbChannels: channels, order: 1, mask: BigInt((1 << channels) - 1) },
+        format: AV_SAMPLE_FMT_FLT,
+        nbSamples: samples,
+        timeBase: new Rational(1, sampleRate),
+      });
+
+      const audioData = new AudioData({
+        format: 'f32',
+        sampleRate,
+        numberOfChannels: channels,
+        numberOfFrames: samples,
+        timestamp: 0,
+        data: new Uint8Array(0),
+        _nativeFrame: frame,
+        _nativeCleanup: () => frame.unref(),
+      } as any);
+
+      encoder.encode(audioData);
+      audioData.close();
+
+      await encoder.flush();
+      encoder.close();
+
+      if (err) {
+        throw err;
+      }
 
       expect(chunks.length).toBeGreaterThan(0);
     }, 30000);

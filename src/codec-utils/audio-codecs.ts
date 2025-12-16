@@ -1,13 +1,14 @@
 /**
- * FFmpeg audio codec mappings
+ * Audio codec mappings
  *
- * Consolidates all audio codec mappings for encoders and decoders
+ * Consolidates all audio codec mappings for encoders and decoders.
+ * Maps between WebCodecs codec strings and libav codec names.
  */
 
 import type { AudioSampleFormat } from '../types/audio.js';
 
 /**
- * WebCodecs audio codec to FFmpeg encoder mapping
+ * WebCodecs audio codec to libav encoder mapping
  */
 export const AUDIO_ENCODER_CODEC_MAP: Record<string, string> = {
   'opus': 'libopus',
@@ -17,13 +18,19 @@ export const AUDIO_ENCODER_CODEC_MAP: Record<string, string> = {
   'mp4a.40.5': 'aac',
   'mp4a.40.29': 'aac',
   'aac': 'aac',
+  'mp4a.67': 'aac', // AAC-LD
   'pcm-s16': 'pcm_s16le',
+  'pcm-s24': 'pcm_s24le',
+  'pcm-s32': 'pcm_s32le',
   'pcm-f32': 'pcm_f32le',
+  'pcm-u8': 'pcm_u8',
+  'ulaw': 'pcm_mulaw',
+  'alaw': 'pcm_alaw',
   'vorbis': 'libvorbis',
 };
 
 /**
- * WebCodecs audio codec to FFmpeg decoder mapping
+ * WebCodecs audio codec to libav decoder mapping
  */
 export const AUDIO_DECODER_CODEC_MAP: Record<string, { decoder: string; format: string }> = {
   'opus': { decoder: 'libopus', format: 'ogg' },
@@ -33,13 +40,19 @@ export const AUDIO_DECODER_CODEC_MAP: Record<string, { decoder: string; format: 
   'mp4a.40.5': { decoder: 'aac', format: 'aac' },
   'mp4a.40.29': { decoder: 'aac', format: 'aac' },
   'aac': { decoder: 'aac', format: 'aac' },
+  'mp4a.67': { decoder: 'aac', format: 'aac' },
   'pcm-s16': { decoder: 'pcm_s16le', format: 's16le' },
+  'pcm-s24': { decoder: 'pcm_s24le', format: 's24le' },
+  'pcm-s32': { decoder: 'pcm_s32le', format: 's32le' },
   'pcm-f32': { decoder: 'pcm_f32le', format: 'f32le' },
+  'pcm-u8': { decoder: 'pcm_u8', format: 'u8' },
+  'ulaw': { decoder: 'pcm_mulaw', format: 'ulaw' },
+  'alaw': { decoder: 'pcm_alaw', format: 'alaw' },
   'vorbis': { decoder: 'libvorbis', format: 'ogg' },
 };
 
 /**
- * FFmpeg encoder to output container format mapping
+ * Encoder to output container format mapping
  */
 export const AUDIO_ENCODER_FORMAT_MAP: Record<string, string> = {
   'libopus': 'ogg',
@@ -47,12 +60,17 @@ export const AUDIO_ENCODER_FORMAT_MAP: Record<string, string> = {
   'flac': 'flac',
   'aac': 'adts',
   'pcm_s16le': 's16le',
+  'pcm_s24le': 's24le',
+  'pcm_s32le': 's32le',
   'pcm_f32le': 'f32le',
+  'pcm_u8': 'u8',
+  'pcm_mulaw': 'ulaw',
+  'pcm_alaw': 'alaw',
   'libvorbis': 'ogg',
 };
 
 /**
- * Frame size per FFmpeg codec (samples per frame)
+ * Frame size per codec (samples per frame)
  */
 export const AUDIO_FRAME_SIZE_MAP: Record<string, number> = {
   'libopus': 960,
@@ -61,7 +79,7 @@ export const AUDIO_FRAME_SIZE_MAP: Record<string, number> = {
 };
 
 /**
- * Audio sample format to FFmpeg settings mapping
+ * Audio sample format to libav settings mapping
  */
 export interface AudioFormatSettings {
   ffmpegFormat: string;
@@ -81,7 +99,7 @@ export const AUDIO_OUTPUT_FORMAT_MAP: Record<AudioSampleFormat, AudioFormatSetti
 };
 
 /**
- * Get FFmpeg encoder codec from WebCodecs codec string
+ * Get libav encoder codec from WebCodecs codec string
  * Returns undefined if codec is not supported
  */
 export function getAudioEncoderCodec(codec: string): string | undefined {
@@ -90,7 +108,7 @@ export function getAudioEncoderCodec(codec: string): string | undefined {
 }
 
 /**
- * Get FFmpeg decoder info from WebCodecs codec string
+ * Get libav decoder info from WebCodecs codec string
  */
 export function getAudioDecoderInfo(codec: string): { decoder: string; format: string } {
   const codecBase = codec.split('.')[0].toLowerCase();
@@ -98,21 +116,21 @@ export function getAudioDecoderInfo(codec: string): { decoder: string; format: s
 }
 
 /**
- * Get output format for an FFmpeg encoder codec
+ * Get output format for a libav encoder codec
  */
 export function getAudioEncoderFormat(ffmpegCodec: string): string {
   return AUDIO_ENCODER_FORMAT_MAP[ffmpegCodec] || 'wav';
 }
 
 /**
- * Get frame size for an FFmpeg encoder codec
+ * Get frame size for a libav encoder codec
  */
 export function getAudioFrameSize(ffmpegCodec: string): number | undefined {
   return AUDIO_FRAME_SIZE_MAP[ffmpegCodec];
 }
 
 /**
- * Get FFmpeg output format settings for an AudioSampleFormat
+ * Get libav output format settings for an AudioSampleFormat
  */
 export function getAudioOutputFormatSettings(format: AudioSampleFormat): AudioFormatSettings {
   return AUDIO_OUTPUT_FORMAT_MAP[format] || AUDIO_OUTPUT_FORMAT_MAP['f32'];

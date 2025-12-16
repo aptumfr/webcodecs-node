@@ -25,3 +25,14 @@ export {
   convertNv12ToI420,
   convertI420ToNv12,
 } from './frame-converter.js';
+
+// Batch conversions with SIMD-friendly optimizations
+export {
+  convertRgbaToI420Fast,
+  convertI420ToRgbaFast,
+  swapRgbaBgraFast,
+  batchConvertFrames,
+  batchConvertFramesStreaming,
+  type BatchFrame,
+  type BatchConversionResult,
+} from './batch-converter.js';

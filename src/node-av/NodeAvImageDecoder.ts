@@ -2,10 +2,11 @@
  * NodeAvImageDecoder - Node-av based image decoder
  *
  * Decodes still images and animated images (GIF, APNG) using node-av
- * native bindings instead of spawning FFmpeg CLI processes.
+ * native bindings (FFmpeg's libav* libraries).
  *
- * Note: Animated WebP is NOT supported due to FFmpeg's webp demuxer
- * skipping ANIM/ANMF chunks. Use FFmpeg CLI fallback for animated WebP.
+ * Note: Animated WebP is NOT fully supported due to FFmpeg's webp demuxer
+ * skipping ANIM/ANMF chunks. Consider using a dedicated WebP library for
+ * animated WebP support.
  */
 
 import { Decoder, Demuxer, FilterAPI } from 'node-av/api';

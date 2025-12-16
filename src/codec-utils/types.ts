@@ -1,19 +1,21 @@
 /**
- * FFmpeg configuration types
+ * Codec configuration types
+ *
+ * Configuration types for video and audio encoding/decoding.
  */
 
 /**
- * FFmpeg process configuration
+ * Codec configuration
  */
-export interface FFmpegConfig {
-  input: FFmpegInputConfig;
-  output: FFmpegOutputConfig;
+export interface CodecConfig {
+  input: CodecInputConfig;
+  output: CodecOutputConfig;
 }
 
 /**
- * FFmpeg input configuration
+ * Input configuration
  */
-export interface FFmpegInputConfig {
+export interface CodecInputConfig {
   format: string;
   codec?: string;
   width?: number;
@@ -23,9 +25,9 @@ export interface FFmpegInputConfig {
 }
 
 /**
- * FFmpeg output configuration
+ * Output configuration
  */
-export interface FFmpegOutputConfig {
+export interface CodecOutputConfig {
   format: string;
   codec?: string;
   width?: number;
@@ -45,7 +47,7 @@ export interface EncodedFrameData {
 }
 
 /**
- * Decoder configuration for FFmpegProcess
+ * Decoder configuration
  */
 export interface DecoderConfig {
   codec: string;
@@ -72,7 +74,7 @@ export type BitrateMode = 'constant' | 'variable' | 'quantizer';
 export type AlphaOption = 'discard' | 'keep';
 
 /**
- * Encoder configuration for FFmpegProcess
+ * Encoder configuration
  */
 export interface EncoderConfig {
   codec: string;

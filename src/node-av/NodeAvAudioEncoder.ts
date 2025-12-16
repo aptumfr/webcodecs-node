@@ -14,6 +14,8 @@ import {
   AV_SAMPLE_FMT_S16P,
   AV_SAMPLE_FMT_S16,
   AV_SAMPLE_FMT_FLT,
+  AV_SAMPLE_FMT_U8,
+  AV_SAMPLE_FMT_S32,
   AV_PKT_FLAG_KEY,
   AV_CHANNEL_ORDER_NATIVE,
   AV_CH_LAYOUT_MONO,
@@ -43,7 +45,7 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
   private encoder: Encoder | null = null;
   private config: AudioEncoderBackendConfig | null = null;
   private frameIndex = 0;
-  private queue: Buffer[] = [];
+  private queue: Array<{ buffer?: Buffer; frame?: Frame; owned?: boolean }> = [];
   private processing = false;
   private processingPromise: Promise<void> | null = null;
   private shuttingDown = false;
@@ -69,9 +71,31 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       return false;
     }
 
-    this.queue.push(Buffer.from(data));
+    this.queue.push({ buffer: Buffer.from(data), owned: true });
     void this.processQueue();
     return true;
+  }
+
+  writeFrame(frame: Frame, owned: boolean = true): boolean {
+    if (!this.config || this.shuttingDown) {
+      return false;
+    }
+
+    try {
+      const buf = frame.toBuffer();
+      if (owned) {
+        try { frame.unref(); } catch { /* ignore */ }
+      }
+      this.queue.push({ buffer: Buffer.from(buf), owned: true });
+      void this.processQueue();
+      return true;
+    } catch (err) {
+      if (owned) {
+        try { frame.unref(); } catch { /* ignore */ }
+      }
+      this.emit('error', err instanceof Error ? err : new Error(String(err)));
+      return false;
+    }
   }
 
   end(): void {
@@ -101,10 +125,14 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
 
       try {
         while (this.queue.length > 0) {
-          const data = this.queue.shift()!;
+          const item = this.queue.shift()!;
           // Emit frameAccepted when frame starts processing (for dequeue event)
           setImmediate(() => this.emit('frameAccepted'));
-          await this.encodeBuffer(data);
+          if (item.frame) {
+            await this.encodeFrame(item.frame, item.owned ?? true);
+          } else if (item.buffer) {
+            await this.encodeBuffer(item.buffer);
+          }
         }
       } catch (err) {
         this.emit('error', err instanceof Error ? err : new Error(String(err)));
@@ -134,6 +162,46 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
 
     // Extract codec description (extradata) for codecs that require it
     this.extractCodecDescription();
+  }
+
+  private async encodeFrame(inputFrame: Frame, owned: boolean): Promise<void> {
+    try {
+      await this.ensureEncoder();
+      if (!this.encoder || !this.config) {
+        throw new Error('Encoder not initialized');
+      }
+
+      const matchesFormat = inputFrame.format === this.encoderSampleFormat;
+      const matchesRate = Number(inputFrame.sampleRate ?? this.config.sampleRate) === this.config.sampleRate;
+
+      if (matchesFormat && matchesRate) {
+        inputFrame.pts = BigInt(this.frameIndex);
+        const nbSamples = inputFrame.nbSamples ?? 0;
+        try {
+          await this.encoder.encode(inputFrame);
+          if (owned) {
+            inputFrame.unref();
+          }
+          await this.drainPackets();
+          this.frameIndex += nbSamples;
+          return;
+        } catch (err) {
+          // Fallback to buffer path if direct encode fails
+          logger.debug(`Direct frame encode failed, falling back to buffer: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+
+      const buffer = inputFrame.toBuffer();
+      if (owned) {
+        inputFrame.unref();
+      }
+      await this.encodeBuffer(buffer);
+    } catch (err) {
+      if (owned) {
+        try { inputFrame.unref(); } catch { /* ignore */ }
+      }
+      throw err;
+    }
   }
 
   private extractCodecDescription(): void {
@@ -196,6 +264,16 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
         return 'libvorbis';
       case 'pcm-s16':
         return 'pcm_s16le';
+      case 'pcm-s24':
+        return 'pcm_s24le';
+      case 'pcm-s32':
+        return 'pcm_s32le';
+      case 'pcm-u8':
+        return 'pcm_u8';
+      case 'ulaw':
+        return 'pcm_mulaw';
+      case 'alaw':
+        return 'pcm_alaw';
       case 'pcm-f32':
         return 'pcm_f32le';
       default:
@@ -228,6 +306,12 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       sampleFormat = AV_SAMPLE_FMT_FLTP;
     } else if (isFlac || codecBase === 'pcm-s16') {
       // flac encoder requires interleaved s16 or s32
+      sampleFormat = AV_SAMPLE_FMT_S16;
+    } else if (codecBase === 'pcm-s24' || codecBase === 'pcm-s32') {
+      sampleFormat = AV_SAMPLE_FMT_S32;
+    } else if (codecBase === 'pcm-u8') {
+      sampleFormat = AV_SAMPLE_FMT_U8;
+    } else if (codecBase === 'ulaw' || codecBase === 'alaw') {
       sampleFormat = AV_SAMPLE_FMT_S16;
     } else {
       // Most codecs work with float planar (aac, etc.)
@@ -311,6 +395,13 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       // Encoder needs planar s16 - convert from f32 interleaved to s16 planar
       audioData = Buffer.from(this.convertToS16Planar(buffer, samplesPerChannel, this.config.numberOfChannels));
       frameFormat = AV_SAMPLE_FMT_S16P;
+    } else if (this.encoderSampleFormat === AV_SAMPLE_FMT_S32) {
+      // Encoder needs interleaved s32 - convert from f32 interleaved to s32 interleaved
+      audioData = Buffer.from(this.convertToS32Interleaved(buffer, samplesPerChannel, this.config.numberOfChannels));
+      frameFormat = AV_SAMPLE_FMT_S32;
+    } else if (this.encoderSampleFormat === AV_SAMPLE_FMT_U8) {
+      audioData = Buffer.from(this.convertToU8Interleaved(buffer, samplesPerChannel, this.config.numberOfChannels));
+      frameFormat = AV_SAMPLE_FMT_U8;
     } else {
       // Default: encoder needs planar float - convert from f32 interleaved to f32 planar
       audioData = Buffer.from(this.convertToPlanar(buffer, samplesPerChannel, this.config.numberOfChannels));
@@ -333,26 +424,7 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
     // don't populate extradata until after encoding starts)
     this.extractCodecDescription();
 
-    let packet = await this.encoder.receive();
-    while (packet) {
-      if (packet.data) {
-        const timestamp = packet.pts !== undefined ? Number(packet.pts) : this.frameIndex;
-        const keyFrame = (packet.flags & AV_PKT_FLAG_KEY) === AV_PKT_FLAG_KEY || (packet as any).isKeyframe;
-        const frameData: any = {
-          data: Buffer.from(packet.data),
-          timestamp,
-          keyFrame,
-        };
-        // Include codec description on the first frame
-        if (this.firstFrame && this.codecDescription) {
-          frameData.description = this.codecDescription;
-          this.firstFrame = false;
-        }
-        this.emit('encodedFrame', frameData);
-      }
-      packet.unref();
-      packet = await this.encoder.receive();
-    }
+    await this.drainPackets();
 
     this.frameIndex += samplesPerChannel;
   }
@@ -392,6 +464,21 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
     return result;
   }
 
+  private convertToS32Interleaved(data: Buffer, samplesPerChannel: number, numChannels: number): Uint8Array {
+    const totalSamples = samplesPerChannel * numChannels;
+    const result = new Uint8Array(totalSamples * 4); // 4 bytes per s32 sample
+
+    const input = new Float32Array(data.buffer, data.byteOffset, data.byteLength / 4);
+    const output = new Int32Array(result.buffer);
+
+    for (let i = 0; i < totalSamples; i++) {
+      const clamped = Math.max(-1.0, Math.min(1.0, input[i]));
+      output[i] = Math.round(clamped * 2147483647);
+    }
+
+    return result;
+  }
+
   private convertToS16Planar(data: Buffer, samplesPerChannel: number, numChannels: number): Uint8Array {
     const bytesPerSample = 2; // s16
     const planeSize = samplesPerChannel * bytesPerSample;
@@ -413,6 +500,21 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
     return result;
   }
 
+  private convertToU8Interleaved(data: Buffer, samplesPerChannel: number, numChannels: number): Uint8Array {
+    const totalSamples = samplesPerChannel * numChannels;
+    const result = new Uint8Array(totalSamples);
+
+    const input = new Float32Array(data.buffer, data.byteOffset, data.byteLength / 4);
+
+    for (let i = 0; i < totalSamples; i++) {
+      const clamped = Math.max(-1.0, Math.min(1.0, input[i]));
+      const u8 = Math.round((clamped + 1) * 127.5); // map [-1,1] to [0,255]
+      result[i] = u8;
+    }
+
+    return result;
+  }
+
   private async finish(): Promise<void> {
     await this.processQueue();
     if (this.processingPromise) {
@@ -422,26 +524,7 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
     if (this.encoder) {
       try {
         await this.encoder.flush();
-        let packet = await this.encoder.receive();
-        while (packet) {
-          if (packet.data) {
-            const timestamp = packet.pts !== undefined ? Number(packet.pts) : this.frameIndex;
-            const keyFrame = (packet.flags & AV_PKT_FLAG_KEY) === AV_PKT_FLAG_KEY || (packet as any).isKeyframe;
-            const frameData: any = {
-              data: Buffer.from(packet.data),
-              timestamp,
-              keyFrame,
-            };
-            // Include codec description on the first frame
-            if (this.firstFrame && this.codecDescription) {
-              frameData.description = this.codecDescription;
-              this.firstFrame = false;
-            }
-            this.emit('encodedFrame', frameData);
-          }
-          packet.unref();
-          packet = await this.encoder.receive();
-        }
+        await this.drainPackets();
       } catch (err) {
         this.emit('error', err instanceof Error ? err : new Error(String(err)));
       }
@@ -449,6 +532,31 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
 
     this.emit('close', 0);
     this.cleanup();
+  }
+
+  private async drainPackets(): Promise<void> {
+    if (!this.encoder) return;
+
+    let packet = await this.encoder.receive();
+    while (packet) {
+      if (packet.data) {
+        const timestamp = packet.pts !== undefined ? Number(packet.pts) : this.frameIndex;
+        const keyFrame = (packet.flags & AV_PKT_FLAG_KEY) === AV_PKT_FLAG_KEY || (packet as any).isKeyframe;
+        const frameData: any = {
+          data: Buffer.from(packet.data),
+          timestamp,
+          keyFrame,
+        };
+        // Include codec description on the first frame
+        if (this.firstFrame && this.codecDescription) {
+          frameData.description = this.codecDescription;
+          this.firstFrame = false;
+        }
+        this.emit('encodedFrame', frameData);
+      }
+      packet.unref();
+      packet = await this.encoder.receive();
+    }
   }
 
   private cleanup(): void {

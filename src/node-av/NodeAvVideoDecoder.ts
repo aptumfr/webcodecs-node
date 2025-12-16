@@ -39,6 +39,7 @@ import { DEFAULT_FRAMERATE } from '../backends/types.js';
 import { parseCodecString } from '../hardware/index.js';
 import { createLogger } from '../utils/logger.js';
 import { selectBestFilterChain, getNextFilterChain, describePipeline } from './HardwarePipeline.js';
+import { acquireHardwareContext, releaseHardwareContext } from '../utils/hardware-pool.js';
 
 const logger = createLogger('NodeAvVideoDecoder');
 
@@ -164,11 +165,8 @@ export class NodeAvVideoDecoder extends EventEmitter implements VideoDecoderBack
       !SKIP_HARDWARE_CODECS.includes(codecName);
 
     if (shouldTryHardware) {
-      try {
-        this.hardware = HardwareContext.auto();
-      } catch {
-        this.hardware = null;
-      }
+      // Use pooled hardware context instead of creating new one
+      this.hardware = acquireHardwareContext();
     }
 
     this.decoder = await Decoder.create(this.stream, {
@@ -225,22 +223,27 @@ export class NodeAvVideoDecoder extends EventEmitter implements VideoDecoderBack
       if (frame === undefined) {
         break;
       }
-      const converted = await this.toOutputBuffer(frame);
-      frame.unref();
-      if (converted) {
-        this.emit('frame', converted);
+      const output = await this.toOutput(frame);
+      if (!output.nativeFrame) {
+        frame.unref();
+      }
+      if (output.buffer) {
+        this.emit('frame', output.buffer);
+      } else if (output.nativeFrame) {
+        this.emit('frame', { nativeFrame: output.nativeFrame, format: this.outputPixelFormat });
       }
       frame = await this.decoder.receive();
     }
   }
 
-  private async toOutputBuffer(frame: any): Promise<Buffer | null> {
+  private async toOutput(frame: any): Promise<{ buffer: Buffer | null; nativeFrame?: any }> {
     const outputFormatName = pixelFormatToFFmpegName(this.outputPixelFormat);
     const isHardwareFrame = Boolean((frame as any).hwFramesCtx);
 
     // If frame already matches requested format and is software, just export
     if (!isHardwareFrame && frame.format === this.outputPixelFormat) {
-      return frame.toBuffer();
+      // Keep frame alive for the caller; they are responsible for unref()
+      return { buffer: null, nativeFrame: frame };
     }
 
     // Try to process with current or new filter chain
@@ -294,12 +297,12 @@ export class NodeAvVideoDecoder extends EventEmitter implements VideoDecoderBack
           filtered = await this.filter.receive();
         }
         if (!filtered) {
-          return null;
+          return { buffer: null };
         }
 
         const buffer = filtered.toBuffer();
         filtered.unref();
-        return buffer;
+        return { buffer };
       } catch (err) {
         // Processing failed - close filter and try next chain
         logger.debug(`Filter processing failed: ${err instanceof Error ? err.message : err}`);
@@ -342,7 +345,8 @@ export class NodeAvVideoDecoder extends EventEmitter implements VideoDecoderBack
     this.filter = null;
     this.decoder?.close();
     this.decoder = null;
-    this.hardware?.dispose();
+    // Release hardware context back to pool for reuse
+    releaseHardwareContext(this.hardware);
     this.hardware = null;
     this.formatContext = null;
     this.stream = null;

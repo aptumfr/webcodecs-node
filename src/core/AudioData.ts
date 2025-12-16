@@ -25,6 +25,8 @@ export class AudioData {
   private _timestamp: number;
   private _duration: number;
   private _buffer: ArrayBuffer;
+  private _nativeFrame: any | null = null;
+  private _nativeCleanup: (() => void) | null = null;
   private _closed = false;
 
   constructor(init: AudioDataInit) {
@@ -52,7 +54,10 @@ export class AudioData {
       throw new TypeError('timestamp is required');
     }
 
-    if (!init.data) {
+    const nativeFrame = (init as any)._nativeFrame;
+    this._nativeCleanup = (init as any)._nativeCleanup ?? null;
+
+    if (!init.data && !nativeFrame) {
       throw new TypeError('data is required');
     }
 
@@ -65,8 +70,10 @@ export class AudioData {
     // Duration in microseconds (must be an integer per spec)
     this._duration = Math.floor((init.numberOfFrames / init.sampleRate) * 1_000_000);
 
-    // Copy or transfer the data
-    if (init.data instanceof ArrayBuffer) {
+    if (nativeFrame) {
+      this._nativeFrame = nativeFrame;
+      this._buffer = new ArrayBuffer(0);
+    } else if (init.data instanceof ArrayBuffer) {
       if (init.transfer?.includes(init.data)) {
         this._buffer = init.data;
       } else {
@@ -74,7 +81,7 @@ export class AudioData {
       }
     } else {
       // ArrayBufferView
-      const view = init.data;
+      const view = init.data as ArrayBufferView;
       const srcBuffer = view.buffer as ArrayBuffer;
       if (init.transfer?.includes(srcBuffer)) {
         this._buffer = srcBuffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
@@ -88,7 +95,7 @@ export class AudioData {
 
     // Validate data size
     const expectedSize = this._calculateTotalSize();
-    if (this._buffer.byteLength < expectedSize) {
+    if (!nativeFrame && this._buffer.byteLength < expectedSize) {
       throw new TypeError(
         `Data buffer too small: ${this._buffer.byteLength} < ${expectedSize}`
       );
@@ -104,6 +111,7 @@ export class AudioData {
 
   allocationSize(options: AudioDataCopyToOptions): number {
     this._checkClosed();
+    this._ensureBuffer();
 
     const frameCount = options.frameCount ?? this._numberOfFrames;
     const format = options.format ?? this._format;
@@ -118,6 +126,7 @@ export class AudioData {
 
   copyTo(destination: ArrayBufferView, options: AudioDataCopyToOptions): void {
     this._checkClosed();
+    this._ensureBuffer();
 
     const planeIndex = options.planeIndex;
     const frameOffset = options.frameOffset ?? 0;
@@ -153,6 +162,7 @@ export class AudioData {
 
   clone(): AudioData {
     this._checkClosed();
+    this._ensureBuffer();
     const dataCopy = new Uint8Array(this._buffer.slice(0));
     return new AudioData({
       format: this._format,
@@ -166,17 +176,58 @@ export class AudioData {
 
   close(): void {
     this._closed = true;
+    if (this._nativeCleanup) {
+      try {
+        this._nativeCleanup();
+      } catch {
+        // ignore cleanup errors
+      }
+    }
+    this._nativeFrame = null;
+    this._nativeCleanup = null;
     (this as any)._buffer = null;
   }
 
   get _rawBuffer(): ArrayBuffer {
     this._checkClosed();
+    this._ensureBuffer();
     return this._buffer;
+  }
+
+  get _native(): any | null {
+    return this._closed ? null : this._nativeFrame;
   }
 
   private _checkClosed(): void {
     if (this._closed) {
       throw new DOMException('AudioData is closed', 'InvalidStateError');
+    }
+  }
+
+  private _ensureBuffer(): void {
+    if (this._buffer && this._buffer.byteLength > 0) {
+      return;
+    }
+    if (this._nativeFrame) {
+      try {
+        const buf = this._nativeFrame.toBuffer();
+        if (buf instanceof Uint8Array) {
+          const sliced = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+          this._buffer = sliced instanceof ArrayBuffer ? sliced : new ArrayBuffer(buf.byteLength);
+          if (!(sliced instanceof ArrayBuffer)) {
+            new Uint8Array(this._buffer).set(buf);
+          }
+        } else {
+          const view = new Uint8Array(buf);
+          const sliced = view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+          this._buffer = sliced instanceof ArrayBuffer ? sliced : new ArrayBuffer(view.byteLength);
+          if (!(sliced instanceof ArrayBuffer)) {
+            new Uint8Array(this._buffer).set(view);
+          }
+        }
+      } catch {
+        this._buffer = new ArrayBuffer(0);
+      }
     }
   }
 

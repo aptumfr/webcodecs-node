@@ -7,7 +7,7 @@
 
 import { EventEmitter } from 'events';
 
-import { Encoder, HardwareContext } from 'node-av/api';
+import { Encoder, FilterAPI, HardwareContext } from 'node-av/api';
 import { Frame, Rational } from 'node-av/lib';
 import {
   AV_PIX_FMT_BGRA,
@@ -35,19 +35,29 @@ import {
 import { parseCodecString } from '../hardware/index.js';
 import { createLogger } from '../utils/logger.js';
 import {
-  convertRgbaToI420,
-  convertRgbaToNv12,
-  convertNv12ToI420,
-  convertI420ToNv12,
-} from '../formats/conversions/index.js';
-import { calculateFrameSize } from '../ffmpeg/formats.js';
-import {
   extractHevcParameterSetsFromAnnexB,
   buildHvccDecoderConfig,
   convertAnnexBToHvcc,
 } from '../utils/hevc.js';
+import { acquireHardwareContext, releaseHardwareContext } from '../utils/hardware-pool.js';
 
 const logger = createLogger('NodeAvVideoEncoder');
+
+/**
+ * Get human-readable name for AVPixelFormat
+ */
+function pixelFormatName(fmt: AVPixelFormat): string {
+  switch (fmt) {
+    case AV_PIX_FMT_YUV420P: return 'yuv420p';
+    case AV_PIX_FMT_YUVA420P: return 'yuva420p';
+    case AV_PIX_FMT_YUV422P: return 'yuv422p';
+    case AV_PIX_FMT_YUV444P: return 'yuv444p';
+    case AV_PIX_FMT_NV12: return 'nv12';
+    case AV_PIX_FMT_RGBA: return 'rgba';
+    case AV_PIX_FMT_BGRA: return 'bgra';
+    default: return 'unknown';
+  }
+}
 
 /**
  * Map WebCodecs pixel format string to AVPixelFormat
@@ -98,9 +108,10 @@ function getSoftwareEncoder(codecName: string): string {
 export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBackend {
   private encoder: Encoder | null = null;
   private hardware: HardwareContext | null = null;
+  private filter: FilterAPI | null = null;
   private config: VideoEncoderBackendConfig | null = null;
   private frameIndex = 0;
-  private queue: Buffer[] = [];
+  private queue: Array<{ buffer?: Buffer; frame?: Frame; owned?: boolean }> = [];
   private processing = false;
   private processingPromise: Promise<void> | null = null;
   private shuttingDown = false;
@@ -109,6 +120,7 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
   private timeBase: Rational = new Rational(1, DEFAULT_FRAMERATE);
   private codecDescription: Buffer | null = null;
   private isHevcCodec = false;
+  private needsFormatConversion = false;
 
   get isHealthy(): boolean {
     return !this.shuttingDown;
@@ -126,7 +138,17 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
       return false;
     }
 
-    this.queue.push(Buffer.from(data));
+    this.queue.push({ buffer: Buffer.from(data), owned: true });
+    void this.processQueue();
+    return true;
+  }
+
+  writeFrame(frame: Frame): boolean {
+    if (!this.config || this.shuttingDown) {
+      return false;
+    }
+
+    this.queue.push({ frame, owned: false });
     void this.processQueue();
     return true;
   }
@@ -162,11 +184,15 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
 
       try {
         while (this.queue.length > 0) {
-          const data = this.queue.shift()!;
+          const item = this.queue.shift()!;
           // Emit frameAccepted when frame starts processing (for dequeue event)
           // Use setImmediate to ensure emit happens after write() returns
           setImmediate(() => this.emit('frameAccepted'));
-          await this.encodeBuffer(data);
+          if (item.frame) {
+            await this.encodeFrame(item.frame, item.owned ?? true);
+          } else if (item.buffer) {
+            await this.encodeBuffer(item.buffer);
+          }
         }
       } catch (err) {
         this.emit('error', err instanceof Error ? err : new Error(String(err)));
@@ -200,7 +226,7 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     } catch (hwErr) {
       if (isHardware) {
         logger.warn(`Hardware encoder failed, falling back to software: ${(hwErr as Error).message}`);
-        this.hardware?.dispose();
+        releaseHardwareContext(this.hardware);
         this.hardware = null;
 
         const softwareCodec = getSoftwareEncoder(codecName);
@@ -219,25 +245,61 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     isHardware: boolean,
     options: Record<string, any>
   ): void {
-    const isRgba = this.inputPixelFormat === AV_PIX_FMT_RGBA || this.inputPixelFormat === AV_PIX_FMT_BGRA;
-    const isNv12Input = this.inputPixelFormat === AV_PIX_FMT_NV12;
-
     if (isHardware) {
       this.encoderPixelFormat = AV_PIX_FMT_NV12;
       options.pixelFormat = AV_PIX_FMT_NV12;
-      if (isRgba) {
-        logger.debug('Converting RGBA input to NV12 for hardware encoder');
-      } else if (!isNv12Input) {
-        logger.debug('Converting input to NV12 for hardware encoder');
-      }
     } else {
       this.encoderPixelFormat = AV_PIX_FMT_YUV420P;
       options.pixelFormat = AV_PIX_FMT_YUV420P;
-      if (isRgba) {
-        logger.debug('Converting RGBA input to I420 for software encoder');
-      } else if (isNv12Input) {
-        logger.debug('Converting NV12 input to I420 for software encoder');
+    }
+
+    // Check if format conversion is needed
+    this.needsFormatConversion = this.inputPixelFormat !== this.encoderPixelFormat;
+
+    if (this.needsFormatConversion) {
+      const targetFormat = this.encoderPixelFormat === AV_PIX_FMT_NV12 ? 'nv12' : 'yuv420p';
+
+      // Try GPU-accelerated filter if hardware context is available
+      if (this.hardware) {
+        const hwType = this.hardware.deviceTypeName;
+        const gpuFilter = this.buildGpuFilterChain(hwType, targetFormat);
+
+        if (gpuFilter) {
+          try {
+            this.filter = FilterAPI.create(gpuFilter, {
+              hardware: this.hardware,
+            } as any);
+            logger.debug(`Created GPU format conversion filter (${hwType}): ${gpuFilter}`);
+            return;
+          } catch (err) {
+            logger.debug(`GPU filter failed, falling back to CPU: ${(err as Error).message}`);
+          }
+        }
       }
+
+      // Fallback: CPU SIMD conversion via libswscale
+      this.filter = FilterAPI.create(`format=${targetFormat}`);
+      logger.debug(`Created CPU format conversion filter: ${pixelFormatName(this.inputPixelFormat)} → ${targetFormat}`);
+    }
+  }
+
+  /**
+   * Build GPU-accelerated filter chain for format conversion
+   * Returns null if no GPU filter is available for this hardware type
+   */
+  private buildGpuFilterChain(hwType: string, targetFormat: string): string | null {
+    // GPU filter chains: upload to GPU → convert on GPU → keep on GPU for encoder
+    switch (hwType) {
+      case 'vaapi':
+        return `format=nv12,hwupload,scale_vaapi=format=${targetFormat}`;
+      case 'cuda':
+        return `format=nv12,hwupload_cuda,scale_cuda=format=${targetFormat}`;
+      case 'qsv':
+        return `format=nv12,hwupload=extra_hw_frames=64,scale_qsv=format=${targetFormat}`;
+      case 'videotoolbox':
+        return `format=nv12,hwupload,scale_vt=format=${targetFormat}`;
+      default:
+        return null;
     }
   }
 
@@ -251,7 +313,8 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
 
     if (shouldTryHardware) {
       try {
-        this.hardware = HardwareContext.auto();
+        // Use pooled hardware context instead of creating new one
+        this.hardware = acquireHardwareContext();
         if (this.hardware) {
           const hwCodec = this.hardware.getEncoderCodec(codecName as any);
           if (hwCodec) {
@@ -260,7 +323,7 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
           }
         }
       } catch {
-        this.hardware?.dispose();
+        releaseHardwareContext(this.hardware);
         this.hardware = null;
       }
     }
@@ -355,7 +418,7 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
       throw new Error('Encoder not initialized');
     }
 
-    const frame = this.createFrame(buffer);
+    const frame = await this.createFrame(buffer, true);
     frame.pts = BigInt(this.frameIndex);
 
     await this.encoder.encode(frame);
@@ -365,60 +428,86 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     this.frameIndex++;
   }
 
-  private createFrame(buffer: Buffer): Frame {
-    const { width, height, inputPixelFormat } = this.config!;
+  private async encodeFrame(inputFrame: Frame, owned: boolean): Promise<void> {
+    await this.ensureEncoder();
+    if (!this.encoder || !this.config) {
+      throw new Error('Encoder not initialized');
+    }
 
-    // Convert input format to encoder format if needed
-    if (this.inputPixelFormat === AV_PIX_FMT_RGBA || this.inputPixelFormat === AV_PIX_FMT_BGRA) {
-      const convertedData = this.encoderPixelFormat === AV_PIX_FMT_NV12
-        ? convertRgbaToNv12(buffer, width, height)
-        : convertRgbaToI420(buffer, width, height);
+    const frame = await this.createFrame(inputFrame, owned);
+    frame.pts = BigInt(this.frameIndex);
 
-      return Frame.fromVideoBuffer(Buffer.from(convertedData), {
+    await this.encoder.encode(frame);
+    if (owned || frame !== inputFrame) {
+      frame.unref();
+    }
+
+    await this.drainPackets();
+    this.frameIndex++;
+  }
+
+  private async createFrame(source: Buffer | Frame, ownInput: boolean): Promise<Frame> {
+    const { width, height } = this.config!;
+
+    const inputFrame = source instanceof Frame
+      ? source
+      : Frame.fromVideoBuffer(source, {
         width,
         height,
-        format: this.encoderPixelFormat,
+        format: this.inputPixelFormat,
         timeBase: this.timeBase,
       });
+
+    if (!this.needsFormatConversion || !this.filter) {
+      return inputFrame;
     }
 
-    if (this.inputPixelFormat === AV_PIX_FMT_NV12 && this.encoderPixelFormat === AV_PIX_FMT_YUV420P) {
-      const convertedData = convertNv12ToI420(buffer, width, height);
-      return Frame.fromVideoBuffer(Buffer.from(convertedData), {
-        width,
-        height,
-        format: AV_PIX_FMT_YUV420P,
-        timeBase: this.timeBase,
-      });
-    }
+    try {
+      await this.filter.process(inputFrame);
+      if (ownInput) {
+        inputFrame.unref();
+      }
 
-    // I420 input to NV12 for hardware encoding
-    if (this.inputPixelFormat === AV_PIX_FMT_YUV420P && this.encoderPixelFormat === AV_PIX_FMT_NV12) {
-      const convertedData = convertI420ToNv12(buffer, width, height);
-      return Frame.fromVideoBuffer(Buffer.from(convertedData), {
-        width,
-        height,
-        format: AV_PIX_FMT_NV12,
-        timeBase: this.timeBase,
-      });
-    }
+      const convertedFrame = await this.filter.receive();
+      if (!convertedFrame) {
+        throw new Error('Format conversion failed: no output from filter');
+      }
 
-    // Direct pass-through - validate buffer size first
-    const formatName = inputPixelFormat || 'yuv420p';
-    const expectedSize = calculateFrameSize(formatName, width, height);
-    if (buffer.length < expectedSize) {
-      throw new Error(
-        `Buffer too small for ${formatName} frame: got ${buffer.length} bytes, expected ${expectedSize} bytes ` +
-        `(${width}x${height}). For I420, size should be width*height*1.5 = ${Math.floor(width * height * 1.5)}`
-      );
-    }
+      return convertedFrame;
+    } catch (err) {
+      // GPU filter failed - fall back to CPU SIMD filter
+      logger.warn(`Filter processing failed, falling back to CPU: ${(err as Error).message}`);
+      if (ownInput) {
+        inputFrame.unref();
+      }
 
-    return Frame.fromVideoBuffer(buffer, {
-      width,
-      height,
-      format: this.inputPixelFormat,
-      timeBase: this.timeBase,
-    });
+      // Close failed filter and create CPU fallback
+      this.filter.close();
+      const targetFormat = this.encoderPixelFormat === AV_PIX_FMT_NV12 ? 'nv12' : 'yuv420p';
+      this.filter = FilterAPI.create(`format=${targetFormat}`);
+      logger.debug(`Created CPU fallback filter: format=${targetFormat}`);
+
+      const retryFrame = source instanceof Frame
+        ? source
+        : Frame.fromVideoBuffer(source, {
+          width,
+          height,
+          format: this.inputPixelFormat,
+          timeBase: this.timeBase,
+        });
+
+      await this.filter.process(retryFrame);
+      if (ownInput || retryFrame !== source) {
+        retryFrame.unref();
+      }
+
+      const convertedFrame = await this.filter.receive();
+      if (!convertedFrame) {
+        throw new Error('CPU format conversion failed: no output from filter');
+      }
+
+      return convertedFrame;
+    }
   }
 
   private async drainPackets(): Promise<void> {
@@ -488,9 +577,12 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
   }
 
   private cleanup(): void {
+    this.filter?.close();
+    this.filter = null;
     this.encoder?.close();
     this.encoder = null;
-    this.hardware?.dispose();
+    // Release hardware context back to pool for reuse
+    releaseHardwareContext(this.hardware);
     this.hardware = null;
     this.queue = [];
   }

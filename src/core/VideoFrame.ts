@@ -5,6 +5,7 @@
 
 import type { BufferSource, DOMRectInit, PlaneLayout } from '../types/index.js';
 import { DOMException, DOMRectReadOnly } from '../types/index.js';
+import { toUint8Array } from '../utils/buffer.js';
 import type { VideoColorSpaceInit } from '../formats/index.js';
 import {
   getFrameAllocationSize,
@@ -45,6 +46,8 @@ import {
 export class VideoFrame {
   private _data: Uint8Array;
   private _closed = false;
+  private _nativeFrame: any | null = null;
+  private _nativeCleanup: (() => void) | null = null;
 
   private _format: VideoPixelFormat;
   private _codedWidth: number;
@@ -81,7 +84,51 @@ export class VideoFrame {
     }
 
     // Check if it's raw pixel data (BufferSource) first
-    if (dataOrImage instanceof ArrayBuffer || ArrayBuffer.isView(dataOrImage)) {
+    if (this._isNativeFrame(dataOrImage)) {
+      const bufferInit = init as VideoFrameBufferInit;
+
+      if (!bufferInit.format) {
+        throw new TypeError('format is required');
+      }
+      if (typeof bufferInit.codedWidth !== 'number' || bufferInit.codedWidth <= 0) {
+        throw new TypeError('codedWidth must be a positive number');
+      }
+      if (typeof bufferInit.codedHeight !== 'number' || bufferInit.codedHeight <= 0) {
+        throw new TypeError('codedHeight must be a positive number');
+      }
+      if (typeof bufferInit.timestamp !== 'number') {
+        throw new TypeError('timestamp is required');
+      }
+
+      this._nativeFrame = dataOrImage;
+      this._nativeCleanup = (init as any)._nativeCleanup ?? null;
+      this._data = new Uint8Array(0);
+
+      this._format = bufferInit.format;
+      this._codedWidth = bufferInit.codedWidth;
+      this._codedHeight = bufferInit.codedHeight;
+      this._timestamp = bufferInit.timestamp;
+      this._duration = bufferInit.duration ?? null;
+
+      this._codedRect = new DOMRectReadOnly(0, 0, bufferInit.codedWidth, bufferInit.codedHeight);
+
+      if (bufferInit.visibleRect) {
+        this._visibleRect = new DOMRectReadOnly(
+          bufferInit.visibleRect.x ?? 0,
+          bufferInit.visibleRect.y ?? 0,
+          bufferInit.visibleRect.width ?? bufferInit.codedWidth,
+          bufferInit.visibleRect.height ?? bufferInit.codedHeight
+        );
+      } else {
+        this._visibleRect = new DOMRectReadOnly(0, 0, bufferInit.codedWidth, bufferInit.codedHeight);
+      }
+
+      this._displayWidth = bufferInit.displayWidth ?? this._visibleRect.width;
+      this._displayHeight = bufferInit.displayHeight ?? this._visibleRect.height;
+      this._colorSpace = new VideoColorSpace(
+        this._getDefaultColorSpace(bufferInit.format, bufferInit.colorSpace)
+      );
+    } else if (dataOrImage instanceof ArrayBuffer || ArrayBuffer.isView(dataOrImage)) {
       const data = dataOrImage as BufferSource;
       const bufferInit = init as VideoFrameBufferInit;
 
@@ -99,11 +146,7 @@ export class VideoFrame {
         throw new TypeError('timestamp is required');
       }
 
-      if (data instanceof ArrayBuffer) {
-        this._data = new Uint8Array(data);
-      } else {
-        this._data = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-      }
+      this._data = toUint8Array(data);
 
       this._format = bufferInit.format;
       this._codedWidth = bufferInit.codedWidth;
@@ -349,6 +392,7 @@ export class VideoFrame {
    */
   allocationSize(options?: VideoFrameCopyToOptions): number {
     this._checkNotClosed();
+    this._ensureDataLoaded();
 
     const format = options?.format ?? this._format;
     const rect = options?.rect;
@@ -373,15 +417,9 @@ export class VideoFrame {
     options?: VideoFrameCopyToOptions
   ): Promise<PlaneLayout[]> {
     this._checkNotClosed();
+    this._ensureDataLoaded();
 
-    let destArray: Uint8Array;
-    if (destination instanceof ArrayBuffer) {
-      destArray = new Uint8Array(destination);
-    } else if (ArrayBuffer.isView(destination)) {
-      destArray = new Uint8Array(destination.buffer, destination.byteOffset, destination.byteLength);
-    } else {
-      throw new TypeError('destination must be an ArrayBuffer or ArrayBufferView');
-    }
+    const destArray = toUint8Array(destination);
 
     const destFormat = options?.format ?? this._format;
     const rect = options?.rect;
@@ -532,6 +570,7 @@ export class VideoFrame {
    */
   clone(): VideoFrame {
     this._checkNotClosed();
+    this._ensureDataLoaded();
     const dataCopy = new Uint8Array(this._data);
     return new VideoFrame(dataCopy, {
       format: this._format,
@@ -551,6 +590,15 @@ export class VideoFrame {
    */
   close(): void {
     this._closed = true;
+    if (this._nativeCleanup) {
+      try {
+        this._nativeCleanup();
+      } catch {
+        // ignore cleanup failures
+      }
+    }
+    this._nativeFrame = null;
+    this._nativeCleanup = null;
     this._data = new Uint8Array(0);
   }
 
@@ -559,12 +607,37 @@ export class VideoFrame {
    */
   get _buffer(): Uint8Array {
     this._checkNotClosed();
+    this._ensureDataLoaded();
     return this._data;
+  }
+
+  get _native(): any | null {
+    return this._closed ? null : this._nativeFrame;
   }
 
   private _checkNotClosed(): void {
     if (this._closed) {
       throw new DOMException('VideoFrame is closed', 'InvalidStateError');
+    }
+  }
+
+  private _isNativeFrame(obj: unknown): obj is object {
+    return Boolean(
+      obj &&
+      typeof obj === 'object' &&
+      typeof (obj as any).toBuffer === 'function' &&
+      typeof (obj as any).unref === 'function'
+    );
+  }
+
+  private _ensureDataLoaded(): void {
+    if (this._data.byteLength === 0 && this._nativeFrame) {
+      try {
+        const buffer = this._nativeFrame.toBuffer();
+        this._data = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+      } catch {
+        this._data = new Uint8Array(0);
+      }
     }
   }
 }

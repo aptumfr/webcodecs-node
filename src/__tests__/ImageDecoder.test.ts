@@ -2,7 +2,6 @@
  * Tests for ImageDecoder class - including animated image support
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ImageDecoder } from '../decoders/ImageDecoder.js';
 import * as fs from 'fs';
 import * as path from 'path';

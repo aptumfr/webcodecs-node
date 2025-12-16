@@ -2,7 +2,6 @@
  * Tests for HardwareAcceleration module
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
 import {
   detectHardwareAcceleration,
   getBestEncoder,

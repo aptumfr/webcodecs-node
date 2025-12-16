@@ -7,13 +7,23 @@ import { WebCodecsEventTarget } from '../utils/event-target.js';
 import { AudioData } from '../core/AudioData.js';
 import { EncodedAudioChunk } from '../core/EncodedAudioChunk.js';
 import { DOMException } from '../types/index.js';
+
+type EventHandler = ((event: Event) => void) | null;
+
 import {
   getAudioEncoderCodec,
   getAudioFrameSize,
   AUDIO_ENCODER_CODEC_MAP,
-} from '../ffmpeg/audio-codecs.js';
+} from '../codec-utils/audio-codecs.js';
 import { buildAudioSpecificConfig, stripAdtsHeader } from '../utils/aac.js';
 import { NodeAvAudioEncoder } from '../node-av/NodeAvAudioEncoder.js';
+import {
+  validateNonEmptyString,
+  validatePositiveInteger,
+  validateRequired,
+} from '../utils/validation.js';
+import { getCodecBase } from '../utils/codec-cache.js';
+import { encodingError, wrapAsWebCodecsError } from '../utils/errors.js';
 
 export type CodecState = 'unconfigured' | 'configured' | 'closed';
 
@@ -47,6 +57,7 @@ export interface AudioEncoderSupport {
 }
 
 const DEFAULT_FLUSH_TIMEOUT = 30000;
+const MAX_QUEUE_SIZE = 100; // Prevent unbounded memory growth
 
 export class AudioEncoder extends WebCodecsEventTarget {
   private _state: CodecState = 'unconfigured';
@@ -60,6 +71,7 @@ export class AudioEncoder extends WebCodecsEventTarget {
   private _ffmpegCodec = '';
   private _bitstreamFormat: 'adts' | 'aac' = 'adts';
   private _codecDescription: Uint8Array | null = null;
+  private _ondequeue: EventHandler | null = null;
 
   constructor(init: AudioEncoderInit) {
     super();
@@ -78,6 +90,10 @@ export class AudioEncoder extends WebCodecsEventTarget {
   get state(): CodecState { return this._state; }
   get encodeQueueSize(): number { return this._encodeQueueSize; }
 
+  /** Event handler called when encodeQueueSize decreases */
+  get ondequeue(): EventHandler { return this._ondequeue; }
+  set ondequeue(handler: EventHandler) { this._ondequeue = handler; }
+
   private _safeErrorCallback(error: Error): void {
     try {
       this._errorCallback(error);
@@ -86,11 +102,23 @@ export class AudioEncoder extends WebCodecsEventTarget {
     }
   }
 
+  /** Fire the dequeue event (both EventTarget and ondequeue handler) */
+  private _fireDequeueEvent(): void {
+    this.emit('dequeue');
+    if (this._ondequeue) {
+      try {
+        this._ondequeue(new Event('dequeue'));
+      } catch {
+        // Ignore errors in user handler per spec
+      }
+    }
+  }
+
   private _safeOutputCallback(chunk: EncodedAudioChunk, metadata?: AudioEncoderOutputMetadata): void {
     try {
       this._outputCallback(chunk, metadata);
     } catch (err) {
-      this._safeErrorCallback(err instanceof Error ? err : new Error(String(err)));
+      this._safeErrorCallback(wrapAsWebCodecsError(err, 'EncodingError'));
     }
   }
 
@@ -99,7 +127,7 @@ export class AudioEncoder extends WebCodecsEventTarget {
       return { supported: false, config };
     }
 
-    const codecBase = config.codec.split('.')[0].toLowerCase();
+    const codecBase = getCodecBase(config.codec);
     const supported = codecBase in AUDIO_ENCODER_CODEC_MAP || config.codec in AUDIO_ENCODER_CODEC_MAP;
 
     return { supported, config };
@@ -110,18 +138,13 @@ export class AudioEncoder extends WebCodecsEventTarget {
       throw new DOMException('Encoder is closed', 'InvalidStateError');
     }
 
-    if (!config || typeof config !== 'object') {
+    validateRequired(config, 'config');
+    if (typeof config !== 'object') {
       throw new TypeError('config must be an object');
     }
-    if (typeof config.codec !== 'string' || config.codec.length === 0) {
-      throw new TypeError('codec must be a non-empty string');
-    }
-    if (typeof config.sampleRate !== 'number' || config.sampleRate <= 0 || !Number.isInteger(config.sampleRate)) {
-      throw new TypeError('sampleRate must be a positive integer');
-    }
-    if (typeof config.numberOfChannels !== 'number' || config.numberOfChannels <= 0 || !Number.isInteger(config.numberOfChannels)) {
-      throw new TypeError('numberOfChannels must be a positive integer');
-    }
+    validateNonEmptyString(config.codec, 'codec');
+    validatePositiveInteger(config.sampleRate, 'sampleRate');
+    validatePositiveInteger(config.numberOfChannels, 'numberOfChannels');
 
     if (config.bitrate !== undefined && (typeof config.bitrate !== 'number' || config.bitrate <= 0)) {
       throw new TypeError('bitrate must be a positive number');
@@ -160,18 +183,43 @@ export class AudioEncoder extends WebCodecsEventTarget {
     }
 
     if (!this._encoder?.isHealthy) {
-      this._safeErrorCallback(new Error('Encoder is not healthy'));
+      this._safeErrorCallback(encodingError('Encoder is not healthy'));
+      return;
+    }
+
+    // Check queue saturation to prevent unbounded memory growth
+    if (this._encodeQueueSize >= MAX_QUEUE_SIZE) {
+      this._safeErrorCallback(new DOMException(
+        `Encoder queue saturated (${MAX_QUEUE_SIZE} frames pending). Wait for dequeue events before encoding more frames.`,
+        'QuotaExceededError'
+      ));
       return;
     }
 
     this._encodeQueueSize++;
 
-    const pcmData = this._audioDataToPCM(data);
+    const nativeFrame = (data as any)._native ?? null;
+    let writeSuccess = false;
 
-    const writeSuccess = this._encoder.write(pcmData);
+    if (nativeFrame && typeof (this._encoder as any).writeFrame === 'function') {
+      const clone = typeof nativeFrame.clone === 'function' ? nativeFrame.clone() : null;
+      const frameForEncode = clone ?? nativeFrame;
+      try {
+        writeSuccess = (this._encoder as any).writeFrame(frameForEncode, true);
+      } catch {
+        writeSuccess = false;
+      }
+      if (!writeSuccess) {
+        const pcmData = this._audioDataToPCM(data);
+        writeSuccess = this._encoder.write(pcmData);
+      }
+    } else {
+      const pcmData = this._audioDataToPCM(data);
+      writeSuccess = this._encoder.write(pcmData);
+    }
     if (!writeSuccess) {
       this._encodeQueueSize = Math.max(0, this._encodeQueueSize - 1);
-      this._safeErrorCallback(new Error('Failed to write audio data to encoder'));
+      this._safeErrorCallback(encodingError('Failed to write audio data to encoder'));
       return;
     }
 
@@ -274,9 +322,9 @@ export class AudioEncoder extends WebCodecsEventTarget {
     });
 
     this._encoder.on('frameAccepted', () => {
-      // Frame has started processing - decrement queue and emit dequeue
+      // Frame has started processing - decrement queue and fire dequeue event
       this._encodeQueueSize = Math.max(0, this._encodeQueueSize - 1);
-      this.emit('dequeue');
+      this._fireDequeueEvent();
     });
 
     this._encoder.on('error', (err: Error) => {
@@ -301,7 +349,7 @@ export class AudioEncoder extends WebCodecsEventTarget {
     const duration = (samplesPerFrame * 1_000_000) / this._config.sampleRate;
 
     let payload = frame.data;
-    const codecBase = this._config.codec.split('.')[0].toLowerCase();
+    const codecBase = getCodecBase(this._config.codec);
     const isAac = codecBase === 'mp4a' || codecBase === 'aac';
 
     // Use description from backend if provided (AAC, FLAC, Vorbis, etc.)
@@ -350,7 +398,7 @@ export class AudioEncoder extends WebCodecsEventTarget {
     const format = data.format;
 
     if (!format) {
-      throw new Error('Cannot convert closed AudioData to PCM');
+      throw encodingError('Cannot convert closed AudioData to PCM');
     }
 
     const bufferSize = numFrames * numChannels * 4;

@@ -4,19 +4,25 @@
  */
 
 import { WebCodecsEventTarget } from '../utils/event-target.js';
+import { toUint8Array } from '../utils/buffer.js';
 import { Buffer } from 'buffer';
 import { VideoFrame } from '../core/VideoFrame.js';
 import type { VideoPixelFormat } from '../core/VideoFrame.js';
 import { EncodedVideoChunk } from '../core/EncodedVideoChunk.js';
 import { NodeAvVideoDecoder } from '../node-av/NodeAvVideoDecoder.js';
 import { DOMException } from '../types/index.js';
+
+type EventHandler = ((event: Event) => void) | null;
+
 import type { VideoColorSpaceInit } from '../formats/index.js';
 import { isVideoCodecBaseSupported } from '../capabilities/index.js';
-import { pixelFormatToFFmpeg } from '../ffmpeg/formats.js';
+import { pixelFormatToFFmpeg } from '../codec-utils/formats.js';
 import type { AvcConfig } from '../utils/avc.js';
 import { convertAvccToAnnexB, parseAvcDecoderConfig } from '../utils/avc.js';
 import type { HvccConfig } from '../utils/hevc.js';
 import { convertHvccToAnnexB, parseHvccDecoderConfig } from '../utils/hevc.js';
+import { getCodecBase } from '../utils/codec-cache.js';
+import { encodingError, wrapAsWebCodecsError } from '../utils/errors.js';
 
 const SUPPORTED_OUTPUT_FORMATS: VideoPixelFormat[] = [
   'I420', 'I420A', 'I422', 'I444', 'NV12', 'RGBA', 'RGBX', 'BGRA', 'BGRX'
@@ -48,6 +54,7 @@ export interface VideoDecoderSupport {
 }
 
 const DEFAULT_FLUSH_TIMEOUT = 30000;
+const MAX_QUEUE_SIZE = 100; // Prevent unbounded memory growth
 
 export class VideoDecoder extends WebCodecsEventTarget {
   private _state: CodecState = 'unconfigured';
@@ -63,6 +70,7 @@ export class VideoDecoder extends WebCodecsEventTarget {
   private _avcConfig: AvcConfig | null = null;
   private _hevcConfig: HvccConfig | null = null;
   private _hardwarePreference: 'no-preference' | 'prefer-hardware' | 'prefer-software' = 'no-preference';
+  private _ondequeue: EventHandler | null = null;
 
   constructor(init: VideoDecoderInit) {
     super();
@@ -81,6 +89,10 @@ export class VideoDecoder extends WebCodecsEventTarget {
   get state(): CodecState { return this._state; }
   get decodeQueueSize(): number { return this._decodeQueueSize; }
 
+  /** Event handler called when decodeQueueSize decreases */
+  get ondequeue(): EventHandler { return this._ondequeue; }
+  set ondequeue(handler: EventHandler) { this._ondequeue = handler; }
+
   private _safeErrorCallback(error: Error): void {
     try {
       this._errorCallback(error);
@@ -89,11 +101,25 @@ export class VideoDecoder extends WebCodecsEventTarget {
     }
   }
 
+  /** Fire the dequeue event (both EventTarget and ondequeue handler) */
+  private _fireDequeueEvent(): void {
+    queueMicrotask(() => {
+      this.emit('dequeue');
+      if (this._ondequeue) {
+        try {
+          this._ondequeue(new Event('dequeue'));
+        } catch {
+          // Ignore errors in user handler per spec
+        }
+      }
+    });
+  }
+
   private _safeOutputCallback(frame: VideoFrame): void {
     try {
       this._outputCallback(frame);
     } catch (err) {
-      this._safeErrorCallback(err instanceof Error ? err : new Error(String(err)));
+      this._safeErrorCallback(wrapAsWebCodecsError(err, 'EncodingError'));
     }
   }
 
@@ -162,10 +188,19 @@ export class VideoDecoder extends WebCodecsEventTarget {
 
     if (!this._decoder?.isHealthy) {
       if (!this._decoder) {
-        this._safeErrorCallback(new Error('Decoder not fully initialized - missing dimensions'));
+        this._safeErrorCallback(encodingError('Decoder not fully initialized - missing dimensions'));
       } else {
-        this._safeErrorCallback(new Error('Decoder process is not healthy'));
+        this._safeErrorCallback(encodingError('Decoder process is not healthy'));
       }
+      return;
+    }
+
+    // Check queue saturation to prevent unbounded memory growth
+    if (this._decodeQueueSize >= MAX_QUEUE_SIZE) {
+      this._safeErrorCallback(new DOMException(
+        `Decoder queue saturated (${MAX_QUEUE_SIZE} chunks pending). Wait for dequeue events before decoding more chunks.`,
+        'QuotaExceededError'
+      ));
       return;
     }
 
@@ -178,7 +213,7 @@ export class VideoDecoder extends WebCodecsEventTarget {
 
     let dataToWrite: Buffer | Uint8Array = chunk._buffer;
 
-    const codecBase = this._config?.codec.split('.')[0].toLowerCase();
+    const codecBase = this._config ? getCodecBase(this._config.codec) : undefined;
     if (codecBase) {
       if (this._avcConfig && (codecBase === 'avc1' || codecBase === 'avc3')) {
         const includeParameterSets = chunk.type === 'key';
@@ -195,7 +230,7 @@ export class VideoDecoder extends WebCodecsEventTarget {
     if (!writeSuccess) {
       this._decodeQueueSize = Math.max(0, this._decodeQueueSize - 1);
       this._pendingChunks.pop();
-      this._safeErrorCallback(new Error('Failed to write chunk data to decoder'));
+      this._safeErrorCallback(encodingError('Failed to write chunk data to decoder'));
     }
   }
 
@@ -299,14 +334,14 @@ export class VideoDecoder extends WebCodecsEventTarget {
       hardwareAcceleration: this._hardwarePreference,
     });
 
-    this._decoder.on('frame', (data: Buffer) => {
+    this._decoder.on('frame', (data: Buffer | { nativeFrame: any }) => {
       this._handleDecodedFrame(data);
     });
 
     this._decoder.on('chunkAccepted', () => {
-      // Chunk has started processing - decrement queue and emit dequeue
+      // Chunk has started processing - decrement queue and fire dequeue event
       this._decodeQueueSize = Math.max(0, this._decodeQueueSize - 1);
-      this.emit('dequeue');
+      this._fireDequeueEvent();
     });
 
     this._decoder.on('error', (err: Error) => {
@@ -326,27 +361,14 @@ export class VideoDecoder extends WebCodecsEventTarget {
       return null;
     }
 
-    const codecBase = config.codec.split('.')[0].toLowerCase();
+    const codecBase = getCodecBase(config.codec);
     if (codecBase !== 'avc1' && codecBase !== 'avc3') {
       return null;
     }
 
-    let bytes: Uint8Array;
-    if (config.description instanceof ArrayBuffer) {
-      bytes = new Uint8Array(config.description);
-    } else if (ArrayBuffer.isView(config.description)) {
-      bytes = new Uint8Array(
-        config.description.buffer,
-        config.description.byteOffset,
-        config.description.byteLength
-      );
-    } else {
-      return null;
-    }
-
-    const copy = new Uint8Array(bytes);
-
     try {
+      const bytes = toUint8Array(config.description);
+      const copy = new Uint8Array(bytes);
       return parseAvcDecoderConfig(copy);
     } catch {
       return null;
@@ -358,27 +380,14 @@ export class VideoDecoder extends WebCodecsEventTarget {
       return null;
     }
 
-    const codecBase = config.codec.split('.')[0].toLowerCase();
+    const codecBase = getCodecBase(config.codec);
     if (codecBase !== 'hvc1' && codecBase !== 'hev1') {
       return null;
     }
 
-    let bytes: Uint8Array;
-    if (config.description instanceof ArrayBuffer) {
-      bytes = new Uint8Array(config.description);
-    } else if (ArrayBuffer.isView(config.description)) {
-      bytes = new Uint8Array(
-        config.description.buffer,
-        config.description.byteOffset,
-        config.description.byteLength
-      );
-    } else {
-      return null;
-    }
-
-    const copy = new Uint8Array(bytes);
-
     try {
+      const bytes = toUint8Array(config.description);
+      const copy = new Uint8Array(bytes);
       return parseHvccDecoderConfig(copy);
     } catch {
       return null;
@@ -390,36 +399,45 @@ export class VideoDecoder extends WebCodecsEventTarget {
       return null;
     }
 
-    if (this._config.description instanceof ArrayBuffer) {
-      return new Uint8Array(this._config.description);
+    try {
+      return toUint8Array(this._config.description);
+    } catch {
+      return null;
     }
-
-    if (ArrayBuffer.isView(this._config.description)) {
-      return new Uint8Array(
-        this._config.description.buffer,
-        this._config.description.byteOffset,
-        this._config.description.byteLength
-      );
-    }
-
-    return null;
   }
 
-  private _handleDecodedFrame(data: Buffer): void {
+  private _handleDecodedFrame(data: Buffer | { nativeFrame: any }): void {
     if (!this._config) return;
 
     const chunkInfo = this._pendingChunks.shift();
     const timestamp = chunkInfo?.timestamp ?? this._frameTimestamp;
     const duration = chunkInfo?.duration ?? this._frameDuration;
 
-    const frame = new VideoFrame(data, {
-      format: this._outputFormat,
-      codedWidth: this._config.codedWidth!,
-      codedHeight: this._config.codedHeight!,
-      timestamp,
-      duration: duration ?? undefined,
-      colorSpace: this._config.colorSpace,
-    });
+    const isNative = typeof data === 'object' && (data as any)?.nativeFrame;
+    const frame = isNative
+      ? new VideoFrame((data as any).nativeFrame, {
+        format: this._outputFormat,
+        codedWidth: this._config.codedWidth!,
+        codedHeight: this._config.codedHeight!,
+        timestamp,
+        duration: duration ?? undefined,
+        colorSpace: this._config.colorSpace,
+        _nativeCleanup: () => {
+          try {
+            (data as any).nativeFrame.unref?.();
+          } catch {
+            // ignore cleanup errors
+          }
+        },
+      } as any)
+      : new VideoFrame(data as Buffer, {
+        format: this._outputFormat,
+        codedWidth: this._config.codedWidth!,
+        codedHeight: this._config.codedHeight!,
+        timestamp,
+        duration: duration ?? undefined,
+        colorSpace: this._config.colorSpace,
+      });
 
     this._safeOutputCallback(frame);
   }

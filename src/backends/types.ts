@@ -1,11 +1,12 @@
 /**
  * Backend interfaces for video/audio encoders and decoders.
  *
- * These interfaces define the contract that all backend implementations
- * (node-av, FFmpeg CLI) must follow.
+ * These interfaces define the contract that backend implementations
+ * (node-av) must follow.
  */
 
 import { EventEmitter } from 'events';
+import type { AudioSampleFormat } from '../formats/audio-formats.js';
 
 /**
  * Encoded frame data emitted by encoders
@@ -78,7 +79,7 @@ export interface AudioDecoderBackendConfig {
   sampleRate: number;
   numberOfChannels: number;
   description?: ArrayBuffer | ArrayBufferView;
-  outputFormat?: string;
+  outputFormat?: AudioSampleFormat;
 }
 
 /**

@@ -25,7 +25,12 @@ import {
   AV_CODEC_ID_FLAC,
   AV_CODEC_ID_VORBIS,
   AV_CODEC_ID_PCM_S16LE,
+  AV_CODEC_ID_PCM_S24LE,
+  AV_CODEC_ID_PCM_S32LE,
   AV_CODEC_ID_PCM_F32LE,
+  AV_CODEC_ID_PCM_U8,
+  AV_CODEC_ID_PCM_MULAW,
+  AV_CODEC_ID_PCM_ALAW,
   AV_CHANNEL_ORDER_NATIVE,
   AV_CH_LAYOUT_MONO,
   AV_CH_LAYOUT_STEREO,
@@ -42,6 +47,7 @@ import type {
 } from '../backends/types.js';
 import type { AudioSampleFormat } from '../types/audio.js';
 import { createLogger } from '../utils/logger.js';
+import { toUint8Array } from '../utils/buffer.js';
 
 const logger = createLogger('NodeAvAudioDecoder');
 
@@ -155,13 +161,7 @@ export class NodeAvAudioDecoder extends EventEmitter implements AudioDecoderBack
 
     // Set extradata if we have description (e.g., AudioSpecificConfig for AAC)
     if (this.config.description) {
-      const desc = this.config.description;
-      let bytes: Uint8Array;
-      if (desc instanceof ArrayBuffer) {
-        bytes = new Uint8Array(desc);
-      } else {
-        bytes = new Uint8Array(desc.buffer, desc.byteOffset, desc.byteLength);
-      }
+      const bytes = toUint8Array(this.config.description);
       params.extradata = Buffer.from(bytes);
     }
 
@@ -173,8 +173,8 @@ export class NodeAvAudioDecoder extends EventEmitter implements AudioDecoderBack
   }
 
   private parseOutputFormat(config: AudioDecoderBackendConfig): AudioSampleFormat {
-    // Default to f32 if not specified
-    return 'f32';
+    const defaultFormat: AudioSampleFormat = 'f32';
+    return config.outputFormat ?? defaultFormat;
   }
 
   private async decodeBuffer(buffer: Buffer): Promise<void> {
@@ -205,21 +205,35 @@ export class NodeAvAudioDecoder extends EventEmitter implements AudioDecoderBack
     while (frame) {
       const nbSamples = frame.nbSamples;
       if (nbSamples > 0) {
-        const converted = await this.toOutputBuffer(frame);
-        frame.unref();
-        if (converted) {
+        const passthrough = this.canPassThrough(frame);
+        if (passthrough) {
           this.emit('frame', {
-            data: converted,
+            nativeFrame: frame,
             numberOfFrames: nbSamples,
             timestamp: this.frameIndex,
           });
           this.frameIndex += nbSamples;
+        } else {
+          const converted = await this.toOutputBuffer(frame);
+          frame.unref();
+          if (converted) {
+            this.emit('frame', {
+              data: converted,
+              numberOfFrames: nbSamples,
+              timestamp: this.frameIndex,
+            });
+            this.frameIndex += nbSamples;
+          }
         }
       } else {
         frame.unref();
       }
       frame = await this.decoder.receive();
     }
+  }
+
+  private canPassThrough(frame: any): boolean {
+    return frame.format === this.outputSampleFormat;
   }
 
   private async toOutputBuffer(frame: any): Promise<Buffer | null> {
@@ -351,8 +365,18 @@ function mapCodecId(codec: string): AVCodecID | null {
       return AV_CODEC_ID_VORBIS;
     case 'pcm-s16':
       return AV_CODEC_ID_PCM_S16LE;
+    case 'pcm-s24':
+      return AV_CODEC_ID_PCM_S24LE;
+    case 'pcm-s32':
+      return AV_CODEC_ID_PCM_S32LE;
     case 'pcm-f32':
       return AV_CODEC_ID_PCM_F32LE;
+    case 'pcm-u8':
+      return AV_CODEC_ID_PCM_U8;
+    case 'ulaw':
+      return AV_CODEC_ID_PCM_MULAW;
+    case 'alaw':
+      return AV_CODEC_ID_PCM_ALAW;
     default:
       return null;
   }

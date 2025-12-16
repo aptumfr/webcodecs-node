@@ -78,3 +78,63 @@ export {
   type EventListener,
   type EventListenerOptions,
 } from './event-target.js';
+
+// Codec caching utilities
+export {
+  getCodecBase,
+  parseCodec,
+  getVideoCodecName,
+  getAudioCodecName,
+  isVideoCodec,
+  isAudioCodec,
+  clearCodecCache,
+  type ParsedCodec,
+  type VideoCodecName,
+  type AudioCodecName,
+} from './codec-cache.js';
+
+// Timeout utilities
+export {
+  withTimeout,
+  createTimeoutWrapper,
+  createTimeoutAbortController,
+  DEFAULT_TIMEOUTS,
+} from './timeout.js';
+
+// Error utilities
+export {
+  createWebCodecsError,
+  invalidStateError,
+  notSupportedError,
+  dataError,
+  encodingError,
+  abortError,
+  quotaExceededError,
+  timeoutError,
+  wrapAsWebCodecsError,
+  isWebCodecsError,
+  type WebCodecsErrorName,
+} from './errors.js';
+
+// Hardware context pooling
+export {
+  HardwareContextPool,
+  getHardwarePool,
+  initHardwarePool,
+  disposeHardwarePool,
+  acquireHardwareContext,
+  releaseHardwareContext,
+  type HardwarePoolConfig,
+} from './hardware-pool.js';
+
+// Buffer pooling for efficient memory reuse
+export {
+  BufferPool,
+  getBufferPool,
+  initBufferPool,
+  disposeBufferPool,
+  acquireBuffer,
+  releaseBuffer,
+  type BufferPoolConfig,
+  type BufferPoolStats,
+} from './buffer-pool.js';

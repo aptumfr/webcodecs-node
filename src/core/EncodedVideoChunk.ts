@@ -4,6 +4,7 @@
  */
 
 import type { BufferSource } from '../types/index.js';
+import { toUint8Array } from '../utils/buffer.js';
 
 export type EncodedVideoChunkType = 'key' | 'delta';
 
@@ -37,26 +38,13 @@ export class EncodedVideoChunk {
     this.timestamp = init.timestamp;
     this.duration = init.duration ?? null;
 
-    if (init.data instanceof ArrayBuffer) {
-      this._data = new Uint8Array(init.data);
-    } else if (ArrayBuffer.isView(init.data)) {
-      this._data = new Uint8Array(init.data.buffer, init.data.byteOffset, init.data.byteLength);
-    } else {
-      throw new TypeError('data must be an ArrayBuffer or ArrayBufferView');
-    }
+    this._data = toUint8Array(init.data);
 
     this.byteLength = this._data.byteLength;
   }
 
   copyTo(destination: BufferSource): void {
-    let destArray: Uint8Array;
-    if (destination instanceof ArrayBuffer) {
-      destArray = new Uint8Array(destination);
-    } else if (ArrayBuffer.isView(destination)) {
-      destArray = new Uint8Array(destination.buffer, destination.byteOffset, destination.byteLength);
-    } else {
-      throw new TypeError('destination must be an ArrayBuffer or ArrayBufferView');
-    }
+    const destArray = toUint8Array(destination);
 
     if (destArray.byteLength < this._data.byteLength) {
       throw new TypeError('destination buffer is too small');

@@ -8,10 +8,13 @@ import { VideoFrame } from '../core/VideoFrame.js';
 import { EncodedVideoChunk } from '../core/EncodedVideoChunk.js';
 import type { EncodedVideoChunkType } from '../core/EncodedVideoChunk.js';
 import { DOMException } from '../types/index.js';
+
+type EventHandler = ((event: Event) => void) | null;
 import type { VideoPixelFormat } from '../core/VideoFrame.js';
 import { isVideoCodecBaseSupported } from '../capabilities/index.js';
-import { pixelFormatToFFmpeg } from '../ffmpeg/formats.js';
+import { pixelFormatToFFmpeg } from '../codec-utils/formats.js';
 import { NodeAvVideoEncoder } from '../node-av/NodeAvVideoEncoder.js';
+import { encodingError, wrapAsWebCodecsError } from '../utils/errors.js';
 
 export type CodecState = 'unconfigured' | 'configured' | 'closed';
 
@@ -55,6 +58,7 @@ export interface VideoEncoderEncodeOptions {
 }
 
 const DEFAULT_FLUSH_TIMEOUT = 30000;
+const MAX_QUEUE_SIZE = 100; // Prevent unbounded memory growth
 
 export class VideoEncoder extends WebCodecsEventTarget {
   private _state: CodecState = 'unconfigured';
@@ -69,6 +73,7 @@ export class VideoEncoder extends WebCodecsEventTarget {
   private _firstChunk = true;
   private _inputFormat: VideoPixelFormat | null = null;
   private _hardwarePreference: 'no-preference' | 'prefer-hardware' | 'prefer-software' = 'no-preference';
+  private _ondequeue: EventHandler | null = null;
 
   constructor(init: VideoEncoderInit) {
     super();
@@ -87,6 +92,10 @@ export class VideoEncoder extends WebCodecsEventTarget {
   get state(): CodecState { return this._state; }
   get encodeQueueSize(): number { return this._encodeQueueSize; }
 
+  /** Event handler called when encodeQueueSize decreases */
+  get ondequeue(): EventHandler { return this._ondequeue; }
+  set ondequeue(handler: EventHandler) { this._ondequeue = handler; }
+
   private _safeErrorCallback(error: Error): void {
     try {
       this._errorCallback(error);
@@ -95,11 +104,25 @@ export class VideoEncoder extends WebCodecsEventTarget {
     }
   }
 
+  /** Fire the dequeue event (both EventTarget and ondequeue handler) */
+  private _fireDequeueEvent(): void {
+    queueMicrotask(() => {
+      this.emit('dequeue');
+      if (this._ondequeue) {
+        try {
+          this._ondequeue(new Event('dequeue'));
+        } catch {
+          // Ignore errors in user handler per spec
+        }
+      }
+    });
+  }
+
   private _safeOutputCallback(chunk: EncodedVideoChunk, metadata?: VideoEncoderOutputMetadata): void {
     try {
       this._outputCallback(chunk, metadata);
     } catch (err) {
-      this._safeErrorCallback(err instanceof Error ? err : new Error(String(err)));
+      this._safeErrorCallback(wrapAsWebCodecsError(err, 'EncodingError'));
     }
   }
 
@@ -171,7 +194,7 @@ export class VideoEncoder extends WebCodecsEventTarget {
     }
 
     if (!frame.format) {
-      this._safeErrorCallback(new Error('Cannot encode a closed VideoFrame'));
+      this._safeErrorCallback(encodingError('Cannot encode a closed VideoFrame'));
       return;
     }
 
@@ -182,13 +205,22 @@ export class VideoEncoder extends WebCodecsEventTarget {
     }
 
     if (!this._encoder?.isHealthy) {
-      this._safeErrorCallback(new Error('Encoder process is not healthy'));
+      this._safeErrorCallback(encodingError('Encoder process is not healthy'));
       return;
     }
 
     if (frame.format !== this._inputFormat) {
-      this._safeErrorCallback(new Error(
+      this._safeErrorCallback(encodingError(
         `Frame format mismatch: expected ${this._inputFormat}, got ${frame.format}. All frames must use the same pixel format.`
+      ));
+      return;
+    }
+
+    // Check queue saturation to prevent unbounded memory growth
+    if (this._encodeQueueSize >= MAX_QUEUE_SIZE) {
+      this._safeErrorCallback(new DOMException(
+        `Encoder queue saturated (${MAX_QUEUE_SIZE} frames pending). Wait for dequeue events before encoding more frames.`,
+        'QuotaExceededError'
       ));
       return;
     }
@@ -204,11 +236,14 @@ export class VideoEncoder extends WebCodecsEventTarget {
       keyFrame,
     });
 
-    const writeSuccess = this._encoder.write(frame._buffer);
+    const nativeFrame = (frame as any)._native ?? null;
+    const writeSuccess = nativeFrame
+      ? this._encoder.writeFrame(nativeFrame)
+      : this._encoder.write(frame._buffer);
     if (!writeSuccess) {
       this._encodeQueueSize = Math.max(0, this._encodeQueueSize - 1);
       this._pendingFrames.pop();
-      this._safeErrorCallback(new Error('Failed to write frame data to encoder'));
+      this._safeErrorCallback(encodingError('Failed to write frame data to encoder'));
     }
   }
 
@@ -312,9 +347,9 @@ export class VideoEncoder extends WebCodecsEventTarget {
     });
 
     this._encoder.on('frameAccepted', () => {
-      // Frame has started processing - decrement queue and emit dequeue
+      // Frame has started processing - decrement queue and fire dequeue event
       this._encodeQueueSize = Math.max(0, this._encodeQueueSize - 1);
-      this.emit('dequeue');
+      this._fireDequeueEvent();
     });
 
     this._encoder.on('error', (err: Error) => {

@@ -2,7 +2,6 @@
  * Tests for MediaCapabilities API
  */
 
-import { describe, it, expect } from 'vitest';
 import { MediaCapabilities, mediaCapabilities } from '../capabilities/index.js';
 
 describe('MediaCapabilities', () => {

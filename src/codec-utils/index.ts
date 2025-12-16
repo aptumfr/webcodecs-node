@@ -1,8 +1,7 @@
 /**
- * FFmpeg utilities
+ * Codec utilities
  *
- * Note: FFmpegProcess has been removed in favor of node-av native bindings.
- * Use NodeAvVideoEncoder/NodeAvVideoDecoder for encoding/decoding.
+ * Provides codec and format mappings between WebCodecs and libav (node-av).
  */
 
 // Types

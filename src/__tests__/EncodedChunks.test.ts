@@ -2,7 +2,6 @@
  * Tests for EncodedVideoChunk and EncodedAudioChunk
  */
 
-import { describe, it, expect } from 'vitest';
 import { EncodedVideoChunk } from '../core/EncodedVideoChunk.js';
 import { EncodedAudioChunk } from '../core/EncodedAudioChunk.js';
 

@@ -1,6 +1,8 @@
 import { VideoEncoder } from '../encoders/VideoEncoder.js';
 import { VideoFrame } from '../core/VideoFrame.js';
 import type { EncodedVideoChunk } from '../core/EncodedVideoChunk.js';
+import { Frame, Rational } from 'node-av';
+import { AV_PIX_FMT_RGBA } from 'node-av/constants';
 
 /**
  * Helper function to create test frames
@@ -201,6 +203,53 @@ describe('NodeAV VideoEncoder backend', () => {
 
       expect(chunks.length).toBeGreaterThan(0);
     }, 60000);
+  });
+
+  describe('Zero-copy encode path', () => {
+    it('encodes a native node-av Frame without copying to a JS buffer', async () => {
+      const chunks: EncodedVideoChunk[] = [];
+      let err: Error | null = null;
+
+      const encoder = new VideoEncoder({
+        output: (chunk) => chunks.push(chunk),
+        error: (e) => { err = e; },
+      });
+
+      encoder.configure({
+        codec: 'avc1.42001E',
+        width,
+        height,
+        framerate: 30,
+        bitrate: 400_000,
+      });
+
+      const nativeFrame = Frame.fromVideoBuffer(Buffer.alloc(width * height * 4), {
+        width,
+        height,
+        format: AV_PIX_FMT_RGBA,
+        timeBase: new Rational(1, 30),
+      });
+
+      const vf = new VideoFrame(nativeFrame as any, {
+        format: 'RGBA',
+        codedWidth: width,
+        codedHeight: height,
+        timestamp: 0,
+        _nativeCleanup: () => nativeFrame.unref(),
+      } as any);
+
+      encoder.encode(vf, { keyFrame: true });
+
+      await encoder.flush();
+      vf.close();
+      encoder.close();
+
+      if (err) {
+        throw err;
+      }
+
+      expect(chunks.length).toBeGreaterThan(0);
+    }, 30000);
   });
 
   describe('Error handling', () => {

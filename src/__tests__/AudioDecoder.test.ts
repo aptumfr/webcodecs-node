@@ -1,8 +1,7 @@
 /**
  * Tests for AudioDecoder class
  */
-
-import { describe, it, expect, vi } from 'vitest';
+import { jest } from '@jest/globals';
 import { AudioDecoder } from '../decoders/AudioDecoder.js';
 import { AudioEncoder } from '../encoders/AudioEncoder.js';
 import { AudioData, AudioSampleFormat } from '../core/AudioData.js';
