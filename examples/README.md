@@ -22,6 +22,8 @@ npx tsx examples/transparent-video.ts
 npx tsx examples/streaming.ts
 npx tsx examples/hardware-encoding.ts
 npx tsx examples/hardware-decoding.ts
+npx tsx examples/canvas-encoding.ts
+npx tsx examples/offscreen-canvas.ts
 ```
 
 ## Examples
@@ -86,6 +88,27 @@ GPU-accelerated decoding. Demonstrates:
 - Using `hardwareAcceleration: 'prefer-hardware'` for decoding
 - Benchmarking hardware vs software decoding
 - Real-time decoding capability analysis
+
+### canvas-encoding.ts
+
+GPU-accelerated canvas rendering with skia-canvas. Demonstrates:
+- GPU acceleration detection (Metal/Vulkan/D3D)
+- Creating GPU-accelerated canvas with `createCanvas()`
+- Using `FrameLoop` with backpressure for smooth encoding
+- Animated canvas drawing with gradients and shapes
+- Proper memory lifecycle (frame closing)
+- Real-time encoding speed measurement
+
+### offscreen-canvas.ts
+
+Browser-compatible OffscreenCanvas API. Demonstrates:
+- Using `OffscreenCanvasPolyfill` (matches browser API)
+- Installing polyfill globally with `installOffscreenCanvasPolyfill()`
+- `ImageDataPolyfill` with `Uint8ClampedArray`
+- `createPixelBuffer()` utilities for pixel manipulation
+- `convertToBlob()` for PNG/JPEG/WebP export
+- `validateEvenDimensions()` for YUV420 compatibility
+- Direct `VideoFrame` creation from OffscreenCanvas
 
 ## Additional Demos
 

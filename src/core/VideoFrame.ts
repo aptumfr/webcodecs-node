@@ -38,9 +38,11 @@ import {
   isCanvasLike,
   isVideoFrameLike,
   isCanvasImageSource,
+  extractCanvasPixels,
   type ImageDataLike,
   type CanvasLike,
   type VideoFrameLike,
+  type SkiaCanvasLike,
 } from '../utils/type-guards.js';
 
 export class VideoFrame {
@@ -76,9 +78,74 @@ export class VideoFrame {
    * Create a VideoFrame from raw pixel data or CanvasImageSource
    */
   constructor(data: BufferSource, init: VideoFrameBufferInit);
-  constructor(image: unknown, init: VideoFrameInit);
-  constructor(dataOrImage: BufferSource | unknown, init: VideoFrameBufferInit | VideoFrameInit) {
-    // Validate init is provided
+  constructor(image: unknown, init?: VideoFrameInit);
+  constructor(dataOrImage: BufferSource | unknown, init?: VideoFrameBufferInit | VideoFrameInit) {
+    // Special case: constructing from another VideoFrame without init
+    if (isVideoFrameLike(dataOrImage)) {
+      const sourceFrame = dataOrImage as VideoFrameLike;
+
+      // Source frame must not be closed
+      if (sourceFrame.format === null) {
+        throw new DOMException('Source VideoFrame is closed', 'InvalidStateError');
+      }
+
+      // Init is optional when constructing from VideoFrame
+      const frameInit = (init as VideoFrameInit) || {};
+
+      // Copy data from source frame
+      let pixelData: Uint8Array;
+      if ((sourceFrame as any)._buffer instanceof Uint8Array) {
+        pixelData = new Uint8Array((sourceFrame as any)._buffer);
+      } else if ((sourceFrame as any)._rawData instanceof Uint8Array) {
+        pixelData = new Uint8Array((sourceFrame as any)._rawData);
+      } else if ((sourceFrame as any)._data instanceof Uint8Array) {
+        pixelData = new Uint8Array((sourceFrame as any)._data);
+      } else {
+        // Try copyTo if available
+        const size = sourceFrame.allocationSize ? sourceFrame.allocationSize() : sourceFrame.codedWidth * sourceFrame.codedHeight * 4;
+        pixelData = new Uint8Array(size);
+        if (sourceFrame.copyTo) {
+          sourceFrame.copyTo(pixelData);
+        }
+      }
+
+      this._data = pixelData;
+      this._format = sourceFrame.format as VideoPixelFormat;
+      this._codedWidth = sourceFrame.codedWidth;
+      this._codedHeight = sourceFrame.codedHeight;
+      // Inherit timestamp from source if not specified
+      this._timestamp = frameInit.timestamp ?? sourceFrame.timestamp;
+      this._duration = frameInit.duration ?? sourceFrame.duration ?? null;
+
+      this._codedRect = new DOMRectReadOnly(0, 0, sourceFrame.codedWidth, sourceFrame.codedHeight);
+
+      if (frameInit.visibleRect) {
+        this._visibleRect = new DOMRectReadOnly(
+          frameInit.visibleRect.x ?? 0,
+          frameInit.visibleRect.y ?? 0,
+          frameInit.visibleRect.width ?? sourceFrame.codedWidth,
+          frameInit.visibleRect.height ?? sourceFrame.codedHeight
+        );
+      } else if (sourceFrame.visibleRect) {
+        this._visibleRect = new DOMRectReadOnly(
+          sourceFrame.visibleRect.x,
+          sourceFrame.visibleRect.y,
+          sourceFrame.visibleRect.width,
+          sourceFrame.visibleRect.height
+        );
+      } else {
+        this._visibleRect = new DOMRectReadOnly(0, 0, sourceFrame.codedWidth, sourceFrame.codedHeight);
+      }
+
+      this._displayWidth = frameInit.displayWidth ?? sourceFrame.displayWidth;
+      this._displayHeight = frameInit.displayHeight ?? sourceFrame.displayHeight;
+      this._colorSpace = new VideoColorSpace(
+        this._getDefaultColorSpace(this._format, frameInit.colorSpace)
+      );
+      return;
+    }
+
+    // Validate init is provided for non-VideoFrame sources
     if (!init || typeof init !== 'object') {
       throw new TypeError('VideoFrame init is required');
     }
@@ -144,6 +211,20 @@ export class VideoFrame {
       }
       if (typeof bufferInit.timestamp !== 'number') {
         throw new TypeError('timestamp is required');
+      }
+
+      // Validate buffer size
+      const expectedSize = getFrameAllocationSize(
+        bufferInit.format,
+        bufferInit.codedWidth,
+        bufferInit.codedHeight
+      );
+      const actualSize = data instanceof ArrayBuffer ? data.byteLength : (data as ArrayBufferView).byteLength;
+      if (actualSize < expectedSize) {
+        throw new TypeError(
+          `Buffer too small: expected at least ${expectedSize} bytes for ${bufferInit.format} ` +
+          `${bufferInit.codedWidth}x${bufferInit.codedHeight}, got ${actualSize}`
+        );
       }
 
       this._data = toUint8Array(data);
@@ -292,67 +373,23 @@ export class VideoFrame {
       };
     }
 
-    // 3. Canvas-like objects
+    // 3. Canvas-like objects (including skia-canvas)
     if (isCanvasLike(source)) {
-      const canvas = source as CanvasLike;
+      const canvas = source as CanvasLike | SkiaCanvasLike;
       const width = canvas.width;
       const height = canvas.height;
 
-      if (typeof canvas._getImageData === 'function') {
-        const imageData = canvas._getImageData();
-        let pixelData = new Uint8Array(imageData.buffer, imageData.byteOffset, imageData.byteLength);
-        pixelData = new Uint8Array(pixelData);
+      // Use unified pixel extraction (handles skia-canvas, polyfills, and standard canvas)
+      let pixelData = extractCanvasPixels(canvas);
+      pixelData = new Uint8Array(pixelData); // Copy to avoid sharing
 
-        if (discardAlpha) {
-          for (let i = 3; i < pixelData.length; i += 4) {
-            pixelData[i] = 255;
-          }
-        }
-
-        return { data: pixelData, width, height, format: 'RGBA' };
-      }
-
-      const ctx = canvas.getContext('2d') as {
-        getImageData?: (x: number, y: number, w: number, h: number) => { data: Uint8ClampedArray };
-        _getImageData?: () => Uint8ClampedArray;
-      } | null;
-
-      if (ctx) {
-        if (typeof ctx._getImageData === 'function') {
-          const imageData = ctx._getImageData();
-          let pixelData = new Uint8Array(imageData.buffer, imageData.byteOffset, imageData.byteLength);
-          pixelData = new Uint8Array(pixelData);
-
-          if (discardAlpha) {
-            for (let i = 3; i < pixelData.length; i += 4) {
-              pixelData[i] = 255;
-            }
-          }
-
-          return { data: pixelData, width, height, format: 'RGBA' };
-        }
-
-        if (typeof ctx.getImageData === 'function') {
-          const imageData = ctx.getImageData(0, 0, width, height);
-          let pixelData = new Uint8Array(imageData.data.buffer, imageData.data.byteOffset, imageData.data.byteLength);
-          pixelData = new Uint8Array(pixelData);
-
-          if (discardAlpha) {
-            for (let i = 3; i < pixelData.length; i += 4) {
-              pixelData[i] = 255;
-            }
-          }
-
-          return { data: pixelData, width, height, format: 'RGBA' };
+      if (discardAlpha) {
+        for (let i = 3; i < pixelData.length; i += 4) {
+          pixelData[i] = 255;
         }
       }
 
-      return {
-        data: new Uint8Array(width * height * 4),
-        width,
-        height,
-        format: 'RGBA',
-      };
+      return { data: pixelData, width, height, format: 'RGBA' };
     }
 
     // 4. Objects with raw data properties

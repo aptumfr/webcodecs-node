@@ -2,6 +2,7 @@
  * Tests for AudioData class
  */
 
+import { jest } from '@jest/globals';
 import { AudioData } from '../core/AudioData.js';
 
 describe('AudioData', () => {
@@ -169,6 +170,33 @@ describe('AudioData', () => {
       expect(Array.from(dest)).toEqual(Array.from(sourceData));
 
       audioData.close();
+    });
+
+    it('should lazily read from a native frame and run cleanup on close', () => {
+      const buf = new Uint8Array([1, 2, 3, 4]);
+      const cleanup = jest.fn();
+      const nativeFrame = {
+        toBuffer: () => buf,
+        unref: cleanup,
+      };
+
+      const audioData = new AudioData({
+        format: 'f32',
+        sampleRate: 48000,
+        numberOfChannels: 1,
+        numberOfFrames: 1,
+        timestamp: 0,
+        data: new Uint8Array(0),
+        _nativeFrame: nativeFrame as any,
+        _nativeCleanup: cleanup,
+      } as any);
+
+      const dest = new Uint8Array(4);
+      audioData.copyTo(dest, { planeIndex: 0, format: 'f32' });
+      expect(Array.from(dest)).toEqual(Array.from(buf));
+
+      audioData.close();
+      expect(cleanup).toHaveBeenCalled();
     });
   });
 

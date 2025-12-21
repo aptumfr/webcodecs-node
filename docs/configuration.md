@@ -93,17 +93,6 @@ encoder.configure({
 - Unpredictable file size
 - Not suitable for streaming
 
-### Codec-Specific Implementation
-
-Different codecs use different parameters for each bitrate mode:
-
-| Codec | CBR | VBR | Quantizer |
-|-------|-----|-----|-----------|
-| H.264 | `-b:v` + `maxrate`/`bufsize`, CBR mode | `-b:v` only | `-crf 23` |
-| H.265 | `-b:v` + `maxrate`/`bufsize`, CBR mode | `-b:v` only | `-crf 28` |
-| VP8/VP9 | `-b:v` + `minrate`/`maxrate` | `-b:v` only | `-crf 31` + `-b:v 0` |
-| AV1 | `-b:v` + `maxrate`/`bufsize` | `-b:v` only | `-crf 30` |
-
 ---
 
 ## Alpha Channel Handling
@@ -131,7 +120,7 @@ The `alpha` option controls how transparent pixels are handled during encoding.
 
 ## Output Bitstream Format
 
-By default the encoders emit Annex B (video) and ADTS/OGG (audio) streams directly from FFmpeg. If you need MP4-style payloads (length-prefixed NAL units, raw AAC frames) you can opt-in via the `format` config field.
+By default the encoders emit Annex B (video) and ADTS/OGG (audio) bitstreams. If you need MP4-style payloads (length-prefixed NAL units, raw AAC frames) you can opt-in via the `format` config field.
 
 ### VideoEncoder `format`
 
@@ -266,11 +255,11 @@ encoder.configure({
 
 | Codec | Quality Mode | Realtime Mode |
 |-------|--------------|---------------|
-| H.264 | Default (B-frames, lookahead) | `-tune zerolatency`, no B-frames |
-| H.265 | Default settings | `-tune zerolatency`, no B-frames |
-| VP8 | Default | `-deadline realtime`, `-cpu-used 8` |
-| VP9 | Row multithreading, tile columns | `-deadline realtime`, `-cpu-used 8` |
-| AV1 | Default | `-usage realtime`, `-cpu-used 8` |
+| H.264 | B-frames, lookahead enabled | Zero-latency tuning, no B-frames |
+| H.265 | Default settings | Zero-latency tuning, no B-frames |
+| VP8 | Default | Realtime deadline, fast encoding |
+| VP9 | Row multithreading, tile columns | Realtime deadline, fast encoding |
+| AV1 | Default | Realtime usage, fast encoding |
 
 **Example for live streaming:**
 

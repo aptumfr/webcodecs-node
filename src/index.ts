@@ -132,8 +132,50 @@ export {
   isCanvasLike,
   isVideoFrameLike,
   isCanvasImageSource,
+  isSkiaCanvas,
+  extractCanvasPixels,
 } from './utils/index.js';
+export type { SkiaCanvasLike } from './utils/index.js';
 
 // Polyfills
 export { installWebCodecsPolyfill } from './polyfill.js';
-export { installOffscreenCanvasPolyfill } from './polyfills/OffscreenCanvas.js';
+export {
+  installOffscreenCanvasPolyfill,
+  OffscreenCanvasPolyfill,
+  ImageDataPolyfill,
+} from './polyfills/OffscreenCanvas.js';
+export type { ImageBitmapPolyfill } from './polyfills/OffscreenCanvas.js';
+
+// Canvas module (GPU-accelerated via skia-canvas)
+export {
+  Canvas,
+  loadImage,
+  FontLibrary,
+  detectGpuAcceleration,
+  isGpuAvailable,
+  getGpuApi,
+  createCanvas,
+  ensureEvenDimensions,
+  validateEvenDimensions,
+  resetGpuCache,
+  createPixelBuffer,
+  createPixelBufferWithColor,
+  getRawPixels,
+  getRawPixelsAsync,
+  resetCanvas,
+  pixelsToImageData,
+  drawPixelsToCanvas,
+  bufferToUint8Array,
+  resizePixels,
+  FrameLoop,
+  createFrameLoop,
+} from './canvas/index.js';
+export type {
+  GpuEngineInfo,
+  CanvasConfig,
+  FrameTiming,
+  FrameLoopConfig,
+  FrameLoopState,
+  RawBufferOptions,
+  FrameCallback,
+} from './canvas/index.js';

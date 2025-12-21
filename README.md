@@ -1,6 +1,6 @@
 # webcodecs-node
 
-WebCodecs API implementation for Node.js using FFmpeg.
+WebCodecs API implementation for Node.js using node-av.
 
 This package provides a Node.js-compatible implementation of the [WebCodecs API](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API), enabling video and audio encoding/decoding in server-side JavaScript applications.
 
@@ -16,7 +16,7 @@ This package provides a Node.js-compatible implementation of the [WebCodecs API]
 - **Latency Modes** - Configure for real-time streaming vs maximum compression
 - **Bitrate Modes** - Constant, variable, and quantizer (CRF) encoding modes
 - **Alpha Channel** - Preserve transparency with VP9 and AV1 codecs
-- **Mediabunny Integration** - Custom encoders/decoders for file conversion
+- **Container Support** - MP4, WebM demuxing/muxing utilities
 
 ## Documentation
 
@@ -28,17 +28,11 @@ This package provides a Node.js-compatible implementation of the [WebCodecs API]
 ## Requirements
 
 - Node.js 18+
-- FFmpeg with encoding libraries (libx264, libx265, libvpx, etc.)
+- The `node-av` package (automatically installed as a dependency)
 
 ```bash
-# Ubuntu/Debian
-sudo apt install ffmpeg
-
-# macOS
-brew install ffmpeg
-
-# Check installation
-ffmpeg -version
+# node-av provides native FFmpeg bindings - no separate FFmpeg installation required
+npm install webcodecs-node
 ```
 
 ## Installation
@@ -67,7 +61,7 @@ const encoder = new VideoEncoder({
   error: (e) => console.error(e),
 });
 
-await encoder.configure({
+encoder.configure({
   codec: 'avc1.42001E', // H.264 Baseline
   width: 1280,
   height: 720,
@@ -100,12 +94,12 @@ Encodes raw video frames to compressed video.
 const encoder = new VideoEncoder({
   output: (chunk, metadata) => {
     // chunk is EncodedVideoChunk
-    // metadata contains timing info
+    // metadata contains decoder config info
   },
   error: (e) => console.error(e),
 });
 
-await encoder.configure({
+encoder.configure({
   codec: 'avc1.42001E',  // H.264
   width: 1920,
   height: 1080,
@@ -114,7 +108,6 @@ await encoder.configure({
   bitrateMode: 'variable',                 // Optional: 'constant', 'variable', or 'quantizer'
   latencyMode: 'realtime',                 // Optional: 'realtime' for streaming, 'quality' for best compression
   hardwareAcceleration: 'prefer-hardware', // Optional: use GPU encoding
-  format: 'mp4',                           // Optional: 'annexb' (default) or 'mp4'
 });
 
 // Create a frame from raw RGBA data
@@ -153,7 +146,7 @@ const decoder = new VideoDecoder({
   error: (e) => console.error(e),
 });
 
-await decoder.configure({
+decoder.configure({
   codec: 'avc1.42001E',
   codedWidth: 1920,
   codedHeight: 1080,
@@ -177,12 +170,11 @@ const encoder = new AudioEncoder({
   error: (e) => console.error(e),
 });
 
-await encoder.configure({
+encoder.configure({
   codec: 'opus',
   sampleRate: 48000,
   numberOfChannels: 2,
   bitrate: 128000,
-  format: 'aac', // Optional: 'adts' (default for AAC) or 'aac'
 });
 
 // Create audio data from raw samples
@@ -221,8 +213,6 @@ const imageData = readFileSync('animation.gif');
 const decoder = new ImageDecoder({
   type: 'image/gif',
   data: imageData,
-  // Optional: transfer ownership for zero-copy
-  // transfer: [imageData.buffer],
 });
 
 // Wait for parsing to complete
@@ -246,21 +236,6 @@ for (let i = 0; i < track.frameCount; i++) {
 
 decoder.close();
 ```
-
-**Constructor options:**
-- `type` - MIME type (required)
-- `data` - ArrayBuffer, TypedArray, or ReadableStream (required)
-- `transfer` - ArrayBuffer[] for zero-copy ownership
-- `colorSpaceConversion` - 'none' | 'default'
-- `desiredWidth` / `desiredHeight` - Target dimensions
-- `preferAnimation` - Prefer animated track if available
-- `premultiplyAlpha` - 'none' | 'premultiply' | 'default'
-
-**Properties:**
-- `type` - MIME type string
-- `complete` - Boolean, true when data is buffered
-- `completed` - Promise that resolves when ready
-- `tracks` - ImageTrackList with track information
 
 **Supported formats:**
 - `image/png`, `image/apng`
@@ -317,35 +292,6 @@ if (encodeInfo.supported && encodeInfo.powerEfficient) {
 }
 ```
 
-**Supported containers & codecs:**
-| Container | Video Codecs | Audio Codecs |
-|-----------|-------------|--------------|
-| video/mp4 | H.264, HEVC, AV1 | AAC |
-| video/webm | VP8, VP9, AV1 | Opus, Vorbis |
-| audio/mp4 | - | AAC |
-| audio/webm | - | Opus, Vorbis |
-| audio/ogg | - | Opus, Vorbis, FLAC |
-| audio/mpeg | - | MP3 |
-
-**Result properties:**
-- `supported` - Whether the configuration can be decoded/encoded
-- `smooth` - Whether playback/encoding will be smooth (no dropped frames)
-- `powerEfficient` - Whether hardware acceleration is available
-
-### MediaCapabilities Profiles
-
-By default, capability queries use heuristics (resolution, bitrate, detected hardware). You can provide a detailed profile generated from the local FFmpeg installation:
-
-```bash
-# Generate a JSON profile alongside the repo (builds first)
-npm run capabilities:generate -- ./webcodecs-capabilities.json
-
-# Point WebCodecs at the profile
-export WEBCODECS_CAPABILITIES_PROFILE=$(pwd)/webcodecs-capabilities.json
-```
-
-`decodingInfo` / `encodingInfo` will load that JSON (schema: `{ video: CapabilityProfileEntry[]; audio: CapabilityProfileEntry[] }`) and match codec/profile/level against those entries for precise limits. Without the env var the library falls back to its built-in heuristics.
-
 ### Hardware Acceleration
 
 Detect and use hardware encoding/decoding:
@@ -372,7 +318,7 @@ const best = await getBestEncoder('h264', 'prefer-hardware');
 console.log(`Using: ${best.encoder} (hardware: ${best.isHardware})`);
 
 // Use in VideoEncoder config
-await encoder.configure({
+encoder.configure({
   codec: 'avc1.42001E',
   width: 1920,
   height: 1080,
@@ -385,23 +331,38 @@ await encoder.configure({
 - **VAAPI** - Intel/AMD on Linux
 - **NVENC/NVDEC** - NVIDIA GPUs
 - **QSV** - Intel Quick Sync Video
-- **VideoToolbox** - macOS (planned)
+- **VideoToolbox** - macOS
+
+### Container Utilities
+
+Import container demuxing/muxing utilities for working with MP4 and WebM files:
+
+```typescript
+import { Mp4Demuxer, WebmMuxer } from 'webcodecs-node/containers';
+
+// Demux an MP4 file
+const demuxer = new Mp4Demuxer(mp4Data);
+await demuxer.initialize();
+
+for await (const sample of demuxer.videoSamples()) {
+  // sample contains encoded video chunks
+}
+
+// Mux encoded chunks to WebM
+const muxer = new WebmMuxer({
+  video: { codec: 'vp9', width: 1920, height: 1080 },
+});
+
+muxer.addVideoChunk(encodedChunk, metadata);
+const webmData = muxer.finalize();
+```
 
 ### Streaming & Latency Modes
 
 For real-time streaming applications, use `latencyMode: 'realtime'` to minimize encoding latency:
 
 ```typescript
-// Real-time streaming encoder
-const encoder = new VideoEncoder({
-  output: (chunk) => {
-    // Send chunk immediately over network
-    streamToClient(chunk);
-  },
-  error: console.error,
-});
-
-await encoder.configure({
+encoder.configure({
   codec: 'avc1.42001E',
   width: 1280,
   height: 720,
@@ -409,40 +370,18 @@ await encoder.configure({
   framerate: 30,
   latencyMode: 'realtime', // Prioritize low latency
 });
-
-// Process frames as they arrive
-camera.on('frame', (frameData) => {
-  const frame = new VideoFrame(frameData, {
-    format: 'RGBA',
-    codedWidth: 1280,
-    codedHeight: 720,
-    timestamp: Date.now() * 1000,
-  });
-
-  encoder.encode(frame);
-  frame.close();
-});
 ```
 
 **Latency mode options:**
 - `'quality'` (default) - Best compression, higher latency (uses B-frames, lookahead)
 - `'realtime'` - Minimum latency for live streaming (no B-frames, zero-delay)
 
-**Codec-specific optimizations in realtime mode:**
-| Codec | Quality Mode | Realtime Mode |
-|-------|-------------|---------------|
-| H.264 | B-frames, rc-lookahead | zerolatency tune, no B-frames |
-| H.265 | B-frames, lookahead | zerolatency tune, no B-frames |
-| VP8   | Default settings | deadline=realtime, cpu-used=8 |
-| VP9   | row-mt, tile-columns | deadline=realtime, cpu-used=8 |
-| AV1   | Default settings | usage=realtime, cpu-used=8 |
-
 ### Bitrate Modes
 
 Control how bitrate is managed during encoding:
 
 ```typescript
-await encoder.configure({
+encoder.configure({
   codec: 'avc1.42001E',
   width: 1920,
   height: 1080,
@@ -451,7 +390,6 @@ await encoder.configure({
 });
 ```
 
-**Bitrate mode options:**
 | Mode | Description | Use Case |
 |------|-------------|----------|
 | `'variable'` | VBR - varies bitrate for quality (default) | General purpose |
@@ -463,8 +401,7 @@ await encoder.configure({
 Preserve transparency when encoding with VP9 or AV1:
 
 ```typescript
-// Encode video with alpha channel
-await encoder.configure({
+encoder.configure({
   codec: 'vp9',
   width: 1920,
   height: 1080,
@@ -482,71 +419,147 @@ const frame = new VideoFrame(rgbaWithAlpha, {
 encoder.encode(frame);
 ```
 
-**Alpha options:**
-- `'discard'` (default) - Strip alpha channel (works with all codecs)
-- `'keep'` - Preserve transparency (VP9 and AV1 only)
+### Canvas Rendering (skia-canvas)
 
-## Mediabunny Integration
-
-For file-to-file conversion, use with [Mediabunny](https://mediabunny.dev):
+GPU-accelerated 2D canvas rendering with automatic hardware detection:
 
 ```typescript
-import { ReadableStream, WritableStream, TransformStream } from 'stream/web';
-import { installWebCodecsPolyfill } from 'webcodecs-node';
-
-// Polyfill Web Streams
-if (typeof globalThis.WritableStream === 'undefined') {
-  globalThis.WritableStream = WritableStream;
-}
-if (typeof globalThis.ReadableStream === 'undefined') {
-  globalThis.ReadableStream = ReadableStream;
-}
-if (typeof globalThis.TransformStream === 'undefined') {
-  globalThis.TransformStream = TransformStream;
-}
-
-// Install WebCodecs
-installWebCodecsPolyfill();
-
 import {
-  Input,
-  Output,
-  Conversion,
-  FilePathSource,
-  FilePathTarget,
-  Mp4OutputFormat,
-  ALL_FORMATS,
-  registerEncoder,
-  registerDecoder,
-} from 'mediabunny';
+  createCanvas,
+  createFrameLoop,
+  detectGpuAcceleration,
+  isGpuAvailable,
+  getGpuApi,
+  ensureEvenDimensions,
+  VideoEncoder,
+} from 'webcodecs-node';
 
-import { FFmpegVideoEncoder } from 'webcodecs-node/mediabunny/FFmpegVideoEncoder';
-import { FFmpegVideoDecoder } from 'webcodecs-node/mediabunny/FFmpegVideoDecoder';
-import { FFmpegAudioEncoder } from 'webcodecs-node/mediabunny/FFmpegAudioEncoder';
-import { FFmpegAudioDecoder } from 'webcodecs-node/mediabunny/FFmpegAudioDecoder';
+// Check GPU availability
+const gpuInfo = detectGpuAcceleration();
+console.log(`Renderer: ${gpuInfo.renderer}`); // 'GPU' or 'CPU'
+console.log(`API: ${getGpuApi()}`);           // 'Metal', 'Vulkan', 'D3D', or null
 
-// Register FFmpeg-backed encoders/decoders
-registerEncoder(FFmpegVideoEncoder);
-registerEncoder(FFmpegAudioEncoder);
-registerDecoder(FFmpegVideoDecoder);
-registerDecoder(FFmpegAudioDecoder);
-
-// Convert video
-const input = new Input({
-  formats: ALL_FORMATS,
-  source: new FilePathSource('input.mkv'),
+// Create GPU-accelerated canvas
+const canvas = createCanvas({
+  width: 1920,
+  height: 1080,
+  gpu: true, // or omit for auto-detection
 });
 
-const output = new Output({
-  format: new Mp4OutputFormat(),
-  target: new FilePathTarget('output.mp4'),
-});
+const ctx = canvas.getContext('2d');
+ctx.fillStyle = 'red';
+ctx.fillRect(0, 0, 1920, 1080);
 
-const conversion = await Conversion.init({ input, output });
-await conversion.execute();
-
-console.log('Conversion complete!');
+// Create VideoFrame directly from canvas
+const frame = new VideoFrame(canvas, { timestamp: 0 });
 ```
+
+**FrameLoop helper** for animation with backpressure:
+
+```typescript
+const loop = createFrameLoop({
+  width: 1920,
+  height: 1080,
+  frameRate: 30,
+  maxQueueSize: 8, // Backpressure limit
+  onFrame: (ctx, timing) => {
+    // Draw each frame
+    ctx.fillStyle = `hsl(${timing.frameIndex % 360}, 100%, 50%)`;
+    ctx.fillRect(0, 0, 1920, 1080);
+  },
+});
+
+loop.start(300); // Generate 300 frames
+
+while (loop.getState() !== 'stopped' || loop.getQueueSize() > 0) {
+  const frame = loop.takeFrame();
+  if (frame) {
+    encoder.encode(frame);
+    frame.close(); // Always close frames!
+  }
+}
+```
+
+**OffscreenCanvas polyfill** for browser-compatible code:
+
+```typescript
+import { installOffscreenCanvasPolyfill } from 'webcodecs-node';
+
+installOffscreenCanvasPolyfill();
+
+// Now use standard OffscreenCanvas API
+const canvas = new OffscreenCanvas(1920, 1080);
+const ctx = canvas.getContext('2d');
+const blob = await canvas.convertToBlob({ type: 'image/png' });
+```
+
+## Performance Tuning
+
+### Memory Management
+
+Always close VideoFrames and AudioData when done:
+
+```typescript
+const frame = new VideoFrame(buffer, { ... });
+try {
+  encoder.encode(frame);
+} finally {
+  frame.close(); // Prevent memory leaks
+}
+```
+
+### Even Dimensions
+
+Video codecs require even dimensions for YUV420 chroma subsampling:
+
+```typescript
+import { ensureEvenDimensions, validateEvenDimensions } from 'webcodecs-node';
+
+// Auto-fix odd dimensions (rounds up)
+const { width, height } = ensureEvenDimensions(1279, 719);
+// Returns { width: 1280, height: 720 }
+
+// Strict validation (throws if odd)
+validateEvenDimensions(1280, 720); // OK
+validateEvenDimensions(1279, 720); // Throws TypeError
+```
+
+### Backpressure Handling
+
+Monitor encoder queue to prevent memory exhaustion:
+
+```typescript
+encoder.addEventListener('dequeue', () => {
+  // Queue size decreased, safe to encode more
+  if (encoder.encodeQueueSize < 10) {
+    encodeNextFrame();
+  }
+});
+```
+
+### Raw Buffer Export
+
+For maximum performance, use raw RGBA buffers instead of PNG/JPEG:
+
+```typescript
+import { getRawPixels } from 'webcodecs-node';
+
+// Fast: raw RGBA buffer (no compression)
+const pixels = getRawPixels(canvas); // Returns Buffer
+
+// Slow: PNG encoding (avoid in hot paths)
+const png = await canvas.toBuffer('png');
+```
+
+### GPU vs CPU Tradeoffs
+
+| Scenario | Recommendation |
+|----------|----------------|
+| HD/4K encoding | `hardwareAcceleration: 'prefer-hardware'` |
+| Real-time streaming | Hardware + `latencyMode: 'realtime'` |
+| Maximum quality | Software + `bitrateMode: 'quantizer'` |
+| Batch processing | Hardware for throughput |
+| Low-end systems | Software (more compatible) |
 
 ## Demos
 
@@ -555,27 +568,32 @@ Run the included demos to test functionality:
 ```bash
 npm run build
 
-# Basic WebCodecs demo
+# Basic demo
+npm run demo
+
+# WebCodecs API demo
 npm run demo:webcodecs
 
 # Image decoding demo (animated GIF/PNG/WebP with frame timing)
 npm run demo:image
 
-# Streaming demo (real-time encoding with latency comparison)
-npm run demo:streaming
-
-# File conversion with Mediabunny
-npm run demo:conversion
-
 # Hardware acceleration detection
 npm run demo:hwaccel
 
-# Hardware vs software encoding comparison
-npm run demo:hwaccel-conversion
+# Streaming demo (real-time encoding)
+npm run demo:streaming
 
-# Video quadrant compositor demo (WebGPU four-up render → MP4)
-# Requires Node 20+; set hardwareAcceleration in src/demos/demo-four-corners.ts to 'prefer-hardware' if VAAPI/NVENC/QSV are available
+# Sample-based encoding demo
+npm run demo:samples
+
+# Container demuxing/muxing demo
+npm run demo:containers
+
+# Video quadrant compositor demo (four-up render)
 npm run demo:fourcorners
+
+# 1080p transcoding demo
+npm run demo:1080p
 ```
 
 ## API Compatibility
@@ -600,12 +618,16 @@ This implementation follows the [WebCodecs specification](https://www.w3.org/TR/
 | bitrateMode | ✓ | ✓ |
 | alpha (transparency) | ✓ | ✓ (VP9, AV1) |
 | isConfigSupported() | ✓ | ✓ |
-| isTypeSupported() | ✓ | ✓ |
 
-**Notes:**
-- Hardware acceleration defaults to software encoding for reliability. Use `hardwareAcceleration: 'prefer-hardware'` to enable GPU acceleration.
-- ImageDecoder supports animated image frame timing (duration, timestamp) and loop count (repetitionCount).
+## Architecture
+
+This library uses **node-av** as its backend, which provides native bindings to FFmpeg's libav* libraries. This approach offers:
+
+- **Native performance** - Direct library calls instead of subprocess spawning
+- **Lower latency** - No IPC overhead between Node.js and FFmpeg
+- **Better resource management** - Native memory handling and cleanup
+- **Simplified deployment** - No need for separate FFmpeg installation
 
 ## License
 
-webcodecs-node is distributed under the GNU Affero General Public License v3.0. Files located under `src/mediabunny/` remain available under the MIT License to preserve compatibility with Mediabunny integrations. See `LICENSE` for full terms.
+webcodecs-node is distributed under the GNU Affero General Public License v3.0. See `LICENSE` for full terms.

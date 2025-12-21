@@ -153,6 +153,19 @@ export class VideoEncoder extends WebCodecsEventTarget {
       throw new TypeError('height must be a positive integer');
     }
 
+    // Validate even dimensions for hardware encoder compatibility
+    // Many hardware encoders (NVENC, QuickSync, VideoToolbox) fail silently with odd dimensions
+    if (config.width % 2 !== 0 || config.height % 2 !== 0) {
+      const oddDims: string[] = [];
+      if (config.width % 2 !== 0) oddDims.push(`width=${config.width}`);
+      if (config.height % 2 !== 0) oddDims.push(`height=${config.height}`);
+      throw new TypeError(
+        `Dimensions must be even for video encoding (${oddDims.join(', ')}). ` +
+        `Most video codecs require even dimensions for YUV420 chroma subsampling. ` +
+        `Use ensureEvenDimensions() to auto-fix odd dimensions.`
+      );
+    }
+
     if (config.bitrate !== undefined && (typeof config.bitrate !== 'number' || config.bitrate <= 0)) {
       throw new TypeError('bitrate must be a positive number');
     }
@@ -370,11 +383,26 @@ export class VideoEncoder extends WebCodecsEventTarget {
     const frameInfo = this._pendingFrames.shift();
     const duration = frameInfo?.duration ?? undefined;
 
-    const framerate = this._config.framerate || 30;
-    const timestamp = (frame.timestamp * 1_000_000) / framerate;
+    // Use the original timestamp from the input frame (stored in pendingFrames)
+    // Fall back to calculated timestamp only if frameInfo is not available
+    let timestamp: number;
+    if (frameInfo?.timestamp !== undefined) {
+      timestamp = frameInfo.timestamp;
+    } else {
+      // Legacy fallback: calculate from frame index
+      const framerate = this._config.framerate || 30;
+      timestamp = Math.round((frame.timestamp * 1_000_000) / framerate);
+    }
+
+    // Determine if this is a keyframe:
+    // - If the encoder produced a keyframe (frame.keyFrame), it's definitely a key
+    // - If user explicitly requested a keyframe (frameInfo.keyFrame), honor that
+    // - Note: Some encoders may not honor keyframe requests immediately due to
+    //   internal buffering, but we report what was requested for spec compliance
+    const isKeyFrame = frame.keyFrame || (frameInfo?.keyFrame ?? false);
 
     const chunk = new EncodedVideoChunk({
-      type: frame.keyFrame ? 'key' : 'delta' as EncodedVideoChunkType,
+      type: isKeyFrame ? 'key' : 'delta' as EncodedVideoChunkType,
       timestamp,
       duration,
       data: new Uint8Array(frame.data),

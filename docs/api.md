@@ -496,7 +496,7 @@ const info = await mediaCapabilities.encodingInfo({
 
 ### Capability Profiles
 
-You can generate a hardware-specific capability profile to make `mediaCapabilities` match your actual FFmpeg install. Use the provided CLI:
+You can generate a hardware-specific capability profile to make `mediaCapabilities` match your actual system capabilities. Use the provided CLI:
 
 ```bash
 npm run capabilities:generate -- ./webcodecs-capabilities.json

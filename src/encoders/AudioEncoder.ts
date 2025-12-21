@@ -104,14 +104,16 @@ export class AudioEncoder extends WebCodecsEventTarget {
 
   /** Fire the dequeue event (both EventTarget and ondequeue handler) */
   private _fireDequeueEvent(): void {
-    this.emit('dequeue');
-    if (this._ondequeue) {
-      try {
-        this._ondequeue(new Event('dequeue'));
-      } catch {
-        // Ignore errors in user handler per spec
+    queueMicrotask(() => {
+      this.emit('dequeue');
+      if (this._ondequeue) {
+        try {
+          this._ondequeue(new Event('dequeue'));
+        } catch {
+          // Ignore errors in user handler per spec
+        }
       }
-    }
+    });
   }
 
   private _safeOutputCallback(chunk: EncodedAudioChunk, metadata?: AudioEncoderOutputMetadata): void {

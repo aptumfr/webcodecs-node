@@ -22,14 +22,36 @@ export interface CanvasLike {
 }
 
 /**
+ * Interface for skia-canvas Canvas objects
+ */
+export interface SkiaCanvasLike {
+  width: number;
+  height: number;
+  gpu: boolean;
+  engine: {
+    renderer: string;
+    api?: string;
+  };
+  // Use any for context since skia-canvas has different types than DOM
+  getContext: (type: '2d') => any;
+  toBuffer: (format: string, options?: unknown) => Promise<Buffer>;
+  toBufferSync: (format: string, options?: unknown) => Buffer;
+}
+
+/**
  * Interface for VideoFrame-like objects (including our polyfill)
  */
 export interface VideoFrameLike {
   codedWidth: number;
   codedHeight: number;
-  format: string;
+  format: string | null;
   timestamp: number;
   duration?: number | null;
+  displayWidth: number;
+  displayHeight: number;
+  visibleRect?: { x: number; y: number; width: number; height: number } | null;
+  allocationSize?: (options?: unknown) => number;
+  copyTo?: (dest: Uint8Array, options?: unknown) => void;
   _buffer?: Uint8Array;
   _rawData?: Uint8Array;
   _data?: Uint8Array;
@@ -49,16 +71,37 @@ export function isImageDataLike(obj: unknown): obj is ImageDataLike {
 }
 
 /**
- * Check if object is a canvas-like object with getContext
+ * Check if object is a skia-canvas Canvas
  */
-export function isCanvasLike(obj: unknown): obj is CanvasLike {
+export function isSkiaCanvas(obj: unknown): obj is SkiaCanvasLike {
   if (!obj || typeof obj !== 'object') return false;
   const o = obj as Record<string, unknown>;
   return (
     typeof o.width === 'number' &&
     typeof o.height === 'number' &&
-    typeof o.getContext === 'function'
+    typeof o.gpu === 'boolean' &&
+    typeof o.getContext === 'function' &&
+    typeof o.toBuffer === 'function' &&
+    typeof o.toBufferSync === 'function' &&
+    typeof o.engine === 'object'
   );
+}
+
+/**
+ * Check if object is a canvas-like object with getContext
+ * Includes both standard canvas and skia-canvas
+ */
+export function isCanvasLike(obj: unknown): obj is CanvasLike | SkiaCanvasLike {
+  if (!obj || typeof obj !== 'object') return false;
+  const o = obj as Record<string, unknown>;
+
+  // Standard canvas check
+  const isStandardCanvas =
+    typeof o.width === 'number' &&
+    typeof o.height === 'number' &&
+    typeof o.getContext === 'function';
+
+  return isStandardCanvas;
 }
 
 /**
@@ -86,4 +129,39 @@ export function isCanvasImageSource(obj: unknown): boolean {
     (typeof o.codedWidth === 'number' && typeof o.codedHeight === 'number') ||
     isImageDataLike(obj)
   );
+}
+
+/**
+ * Extract raw pixel data from any canvas-like object
+ * Returns RGBA Uint8Array
+ *
+ * @param canvas - Any canvas-like object (skia-canvas, polyfill, or standard)
+ * @returns Raw RGBA pixel data as Uint8Array
+ */
+export function extractCanvasPixels(canvas: CanvasLike | SkiaCanvasLike): Uint8Array {
+  // Try skia-canvas method first (most efficient)
+  if ('toBufferSync' in canvas && typeof canvas.toBufferSync === 'function') {
+    const buffer = (canvas as SkiaCanvasLike).toBufferSync('raw', { colorType: 'rgba' });
+    return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  }
+
+  // Try polyfill method
+  if ('_getImageData' in canvas && typeof canvas._getImageData === 'function') {
+    const data = (canvas as CanvasLike)._getImageData!();
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  }
+
+  // Standard canvas 2D context
+  const ctx = canvas.getContext('2d') as any;
+  if (ctx && typeof ctx.getImageData === 'function') {
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    return new Uint8Array(
+      imageData.data.buffer,
+      imageData.data.byteOffset,
+      imageData.data.byteLength
+    );
+  }
+
+  // Fallback: empty buffer
+  return new Uint8Array(canvas.width * canvas.height * 4);
 }

@@ -38,9 +38,12 @@ export {
   isCanvasLike,
   isVideoFrameLike,
   isCanvasImageSource,
+  isSkiaCanvas,
+  extractCanvasPixels,
   type ImageDataLike,
   type CanvasLike,
   type VideoFrameLike,
+  type SkiaCanvasLike,
 } from './type-guards.js';
 
 // Codec helpers

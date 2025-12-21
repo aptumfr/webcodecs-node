@@ -16,7 +16,7 @@ export interface EncodedAudioChunkInit {
 export class EncodedAudioChunk {
   private _type: EncodedAudioChunkType;
   private _timestamp: number;
-  private _duration: number | undefined;
+  private _duration: number | null;
   private _data: ArrayBuffer;
 
   constructor(init: EncodedAudioChunkInit) {
@@ -38,7 +38,7 @@ export class EncodedAudioChunk {
 
     this._type = init.type;
     this._timestamp = init.timestamp;
-    this._duration = init.duration;
+    this._duration = init.duration ?? null;
 
     if (init.data instanceof ArrayBuffer) {
       if (init.transfer?.includes(init.data)) {
@@ -55,7 +55,7 @@ export class EncodedAudioChunk {
 
   get type(): EncodedAudioChunkType { return this._type; }
   get timestamp(): number { return this._timestamp; }
-  get duration(): number | undefined { return this._duration; }
+  get duration(): number | null { return this._duration; }
   get byteLength(): number { return this._data.byteLength; }
 
   copyTo(destination: ArrayBufferView): void {
