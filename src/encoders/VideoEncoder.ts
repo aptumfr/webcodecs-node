@@ -15,6 +15,7 @@ import { isVideoCodecBaseSupported } from '../capabilities/index.js';
 import { pixelFormatToFFmpeg } from '../codec-utils/formats.js';
 import { NodeAvVideoEncoder } from '../node-av/NodeAvVideoEncoder.js';
 import { encodingError, wrapAsWebCodecsError } from '../utils/errors.js';
+import { validateVideoEncoderConfig, validateVideoCodec } from '../utils/codec-validation.js';
 
 export type CodecState = 'unconfigured' | 'configured' | 'closed';
 
@@ -154,12 +155,22 @@ export class VideoEncoder extends WebCodecsEventTarget {
   }
 
   static async isConfigSupported(config: VideoEncoderConfig): Promise<VideoEncoderSupport> {
-    if (!config.codec || !config.width || !config.height) {
+    // Validate config - throws TypeError for invalid configs per spec
+    validateVideoEncoderConfig(config);
+
+    // Check for odd dimensions (required for YUV420)
+    if (config.width % 2 !== 0 || config.height % 2 !== 0) {
       return { supported: false, config };
     }
 
-    const supported = isVideoCodecBaseSupported(config.codec);
-    return { supported, config };
+    // Check for unreasonably large dimensions
+    if (config.width > 16384 || config.height > 16384) {
+      return { supported: false, config };
+    }
+
+    // Validate codec string format and check if supported
+    const codecValidation = validateVideoCodec(config.codec);
+    return { supported: codecValidation.supported, config };
   }
 
   configure(config: VideoEncoderConfig): void {

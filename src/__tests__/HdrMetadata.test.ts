@@ -97,11 +97,16 @@ describe('HDR Metadata', () => {
 
       const json = colorSpace.toJSON();
 
+      // toJSON returns spec-compliant output (4 standard properties)
       expect(json.primaries).toBe('bt2020');
       expect(json.transfer).toBe('pq');
-      expect(json.hdrMetadata).toBeDefined();
-      expect(json.hdrMetadata?.smpteSt2086?.maxLuminance).toBe(4000);
-      expect(json.hdrMetadata?.smpteSt2086?.minLuminance).toBe(0.001);
+      expect(json.matrix).toBe('bt2020-ncl');
+      expect(json.fullRange).toBe(false);
+
+      // hdrMetadata is available on the object directly (our extension)
+      expect(colorSpace.hdrMetadata).toBeDefined();
+      expect(colorSpace.hdrMetadata?.smpteSt2086?.maxLuminance).toBe(4000);
+      expect(colorSpace.hdrMetadata?.smpteSt2086?.minLuminance).toBe(0.001);
     });
   });
 

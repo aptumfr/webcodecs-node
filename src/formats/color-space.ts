@@ -157,17 +157,18 @@ export class VideoColorSpace {
     );
   }
 
-  toJSON(): VideoColorSpaceInit {
-    const result: VideoColorSpaceInit = {
-      primaries: this.primaries as VideoColorSpaceInit['primaries'],
-      transfer: this.transfer as VideoColorSpaceInit['transfer'],
-      matrix: this.matrix as VideoColorSpaceInit['matrix'],
-      fullRange: this.fullRange ?? undefined,
+  toJSON(): {
+    primaries: string | null;
+    transfer: string | null;
+    matrix: string | null;
+    fullRange: boolean | null;
+  } {
+    return {
+      primaries: this.primaries,
+      transfer: this.transfer,
+      matrix: this.matrix,
+      fullRange: this.fullRange,
     };
-    if (this.hdrMetadata) {
-      result.hdrMetadata = this.hdrMetadata;
-    }
-    return result;
   }
 }
 

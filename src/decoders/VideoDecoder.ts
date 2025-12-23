@@ -23,6 +23,7 @@ import type { HvccConfig } from '../utils/hevc.js';
 import { convertHvccToAnnexB, parseHvccDecoderConfig } from '../utils/hevc.js';
 import { getCodecBase } from '../utils/codec-cache.js';
 import { encodingError, wrapAsWebCodecsError } from '../utils/errors.js';
+import { validateVideoDecoderConfig, validateVideoCodec } from '../utils/codec-validation.js';
 
 const SUPPORTED_OUTPUT_FORMATS: VideoPixelFormat[] = [
   'I420', 'I420A', 'I422', 'I444', 'NV12', 'RGBA', 'RGBX', 'BGRA', 'BGRX',
@@ -154,12 +155,12 @@ export class VideoDecoder extends WebCodecsEventTarget {
   }
 
   static async isConfigSupported(config: VideoDecoderConfig): Promise<VideoDecoderSupport> {
-    if (!config.codec) {
-      return { supported: false, config };
-    }
+    // Validate config - throws TypeError for invalid configs per spec
+    validateVideoDecoderConfig(config);
 
-    const supported = isVideoCodecBaseSupported(config.codec);
-    return { supported, config };
+    // Validate codec string format and check if supported
+    const codecValidation = validateVideoCodec(config.codec);
+    return { supported: codecValidation.supported, config };
   }
 
   configure(config: VideoDecoderConfig): void {

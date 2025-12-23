@@ -649,6 +649,14 @@ export class VideoFrame {
     this._checkNotClosed();
     this._ensureDataLoaded();
     const dataCopy = new Uint8Array(this._data);
+    // Convert null values from toJSON to undefined for VideoColorSpaceInit
+    const colorSpaceJson = this._colorSpace.toJSON();
+    const colorSpace: VideoColorSpaceInit = {
+      primaries: (colorSpaceJson.primaries ?? undefined) as VideoColorSpaceInit['primaries'],
+      transfer: (colorSpaceJson.transfer ?? undefined) as VideoColorSpaceInit['transfer'],
+      matrix: (colorSpaceJson.matrix ?? undefined) as VideoColorSpaceInit['matrix'],
+      fullRange: colorSpaceJson.fullRange ?? undefined,
+    };
     return new VideoFrame(dataCopy, {
       format: this._format,
       codedWidth: this._codedWidth,
@@ -658,7 +666,7 @@ export class VideoFrame {
       displayWidth: this._displayWidth,
       displayHeight: this._displayHeight,
       visibleRect: this._visibleRect.toJSON(),
-      colorSpace: this._colorSpace.toJSON(),
+      colorSpace,
     });
   }
 
