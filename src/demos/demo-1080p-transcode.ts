@@ -9,9 +9,10 @@ import { transcode, getMediaInfo } from '../containers/index.js';
 import { unlink, stat } from 'fs/promises';
 import { existsSync } from 'fs';
 
-const INPUT_FILE = 'media/bbb_1080_30s.mp4';
+const INPUT_FILE = 'media/testvideo.mp4';
 const OUTPUT_SOFTWARE = 'output_1080p_software.mp4';
 const OUTPUT_HARDWARE = 'output_1080p_hardware.mp4';
+const TEST_VIDEO_URL = 'https://test-videos.co.uk/bigbuckbunny/mp4-h264';
 
 async function cleanup(file: string) {
   if (existsSync(file)) {
@@ -39,7 +40,12 @@ async function main() {
   // Check if input file exists
   if (!existsSync(INPUT_FILE)) {
     console.error(`Error: Input file not found: ${INPUT_FILE}`);
-    console.error('Please ensure the media file exists.');
+    console.error('');
+    console.error('Please download a test video and save it as media/testvideo.mp4');
+    console.error(`You can get one from: ${TEST_VIDEO_URL}`);
+    console.error('');
+    console.error('Example (1080p, ~30s):');
+    console.error('  curl -L "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_1MB.mp4" -o media/testvideo.mp4');
     process.exit(1);
   }
 

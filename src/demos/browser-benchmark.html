@@ -22,7 +22,7 @@
   <div class="box">
     <h3>Input Video</h3>
     <input type="file" id="fileInput" accept="video/*">
-    <p>Or use URL: <input type="text" id="videoUrl" placeholder="http://localhost:8080/media/bbb_1080_30s.mp4" size="50"></p>
+    <p>Or use URL: <input type="text" id="videoUrl" placeholder="http://localhost:8080/media/testvideo.mp4" size="50"></p>
     <button onclick="loadFromUrl()">Load from URL</button>
   </div>
 
@@ -63,7 +63,7 @@ document.getElementById('fileInput').addEventListener('change', (e) => {
 });
 
 async function loadFromUrl() {
-  const url = document.getElementById('videoUrl').value || 'media/bbb_1080_30s.mp4';
+  const url = document.getElementById('videoUrl').value || 'media/testvideo.mp4';
   log(`Fetching ${url}...`);
   try {
     const response = await fetch(url);
