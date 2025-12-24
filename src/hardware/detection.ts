@@ -28,6 +28,20 @@ const DEVICE_TYPE_MAP: Record<string, HardwareAccelerationMethod> = {
   'v4l2m2m': 'v4l2m2m',
 };
 
+// Additional methods implied by detected hardware
+// When CUDA is available, NVENC (encoder) and NVDEC (decoder) are also available
+const IMPLIED_METHODS: Record<HardwareAccelerationMethod, HardwareAccelerationMethod[]> = {
+  'cuda': ['nvenc', 'nvdec'],
+  'vaapi': [],
+  'qsv': [],
+  'videotoolbox': [],
+  'drm': [],
+  'v4l2m2m': [],
+  'none': [],
+  'nvenc': [],
+  'nvdec': [],
+};
+
 function collectHwaccels(): HardwareAccelerationMethod[] {
   try {
     const available = HardwareContext.listAvailable();
@@ -37,6 +51,13 @@ function collectHwaccels(): HardwareAccelerationMethod[] {
       const mapped = DEVICE_TYPE_MAP[deviceType];
       if (mapped) {
         methods.push(mapped);
+        // Add implied methods (e.g., CUDA implies NVENC/NVDEC)
+        const implied = IMPLIED_METHODS[mapped];
+        for (const impliedMethod of implied) {
+          if (!methods.includes(impliedMethod)) {
+            methods.push(impliedMethod);
+          }
+        }
       }
     }
 
