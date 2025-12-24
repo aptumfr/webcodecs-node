@@ -7,6 +7,9 @@
 import { Demuxer } from './Demuxer.js';
 import { VideoDecoder } from '../decoders/VideoDecoder.js';
 import { VideoFrame } from '../core/VideoFrame.js';
+import { Logger } from '../utils/logger.js';
+
+const logger = new Logger('Extract');
 
 /**
  * Extract video frames from a container file as VideoFrame objects
@@ -42,7 +45,7 @@ export async function* extractVideoFrames(inputPath: string): AsyncGenerator<Vid
     output: (frame: VideoFrame) => {
       frames.push(frame);
     },
-    error: (err) => console.error('Decode error:', err),
+    error: (err) => logger.error('Decode error:', err),
   });
 
   decoder.configure({
