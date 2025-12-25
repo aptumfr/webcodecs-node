@@ -8,6 +8,7 @@ import { spawn } from 'child_process';
 import type {
   HardwareAccelerationMethod,
   HardwareCapabilities,
+  HardwareEncoderInfo,
   VideoCodecName,
 } from './types.js';
 import { SOFTWARE_ENCODERS } from './types.js';
@@ -15,6 +16,7 @@ import {
   detectHardwareAcceleration,
   detectHardwareAccelerationSync,
 } from './detection.js';
+import { getHwaccelConfig } from '../config/webcodecs-config.js';
 
 /**
  * Get the best available encoder for a codec
@@ -35,6 +37,36 @@ export function getBestEncoderSync(
   return selectBestEncoder(capabilities, codec, preference);
 }
 
+/**
+ * Sort encoders by config priority order, then by default priority
+ */
+function sortEncodersByConfig(
+  encoders: (HardwareEncoderInfo & { available: boolean })[],
+  configOrder: HardwareAccelerationMethod[] | undefined
+): (HardwareEncoderInfo & { available: boolean })[] {
+  if (!configOrder || configOrder.length === 0) {
+    // No config override - use default priorities
+    return encoders.sort((a, b) => a.priority - b.priority);
+  }
+
+  // Sort by config order first, then by default priority for methods not in config
+  return encoders.sort((a, b) => {
+    const aIdx = configOrder.indexOf(a.hwaccel);
+    const bIdx = configOrder.indexOf(b.hwaccel);
+
+    // Both in config - use config order
+    if (aIdx !== -1 && bIdx !== -1) {
+      return aIdx - bIdx;
+    }
+    // Only a in config - a wins
+    if (aIdx !== -1) return -1;
+    // Only b in config - b wins
+    if (bIdx !== -1) return 1;
+    // Neither in config - use default priority
+    return a.priority - b.priority;
+  });
+}
+
 function selectBestEncoder(
   capabilities: HardwareCapabilities,
   codec: VideoCodecName,
@@ -48,13 +80,27 @@ function selectBestEncoder(
     };
   }
 
-  // Find available hardware encoders for this codec, sorted by priority
-  const hwEncoders = capabilities.encoders
-    .filter(enc => enc.codec === codec && enc.available)
-    .sort((a, b) => a.priority - b.priority);
+  // Get config-based hwaccel order for this codec
+  const configOrder = getHwaccelConfig(codec);
 
-  if (hwEncoders.length > 0) {
-    const best = hwEncoders[0];
+  // If config explicitly sets empty array, force software encoding
+  if (configOrder !== undefined && configOrder.length === 0) {
+    return {
+      encoder: SOFTWARE_ENCODERS[codec],
+      hwaccel: null,
+      isHardware: false,
+    };
+  }
+
+  // Find available hardware encoders for this codec
+  const hwEncoders = capabilities.encoders
+    .filter(enc => enc.codec === codec && enc.available);
+
+  // Sort by config order, then default priority
+  const sorted = sortEncodersByConfig(hwEncoders, configOrder);
+
+  if (sorted.length > 0) {
+    const best = sorted[0];
     return {
       encoder: best.name,
       hwaccel: best.hwaccel,

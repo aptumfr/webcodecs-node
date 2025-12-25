@@ -32,7 +32,7 @@ import {
   DEFAULT_VP_BITRATE,
   CRF_DEFAULTS,
 } from '../backends/types.js';
-import { parseCodecString } from '../hardware/index.js';
+import { parseCodecString, getBestEncoderSync } from '../hardware/index.js';
 import { createLogger } from '../utils/logger.js';
 import {
   extractHevcParameterSetsFromAnnexB,
@@ -230,6 +230,8 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
 
     this.configurePixelFormat(isHardware, options);
 
+    logger.debug(`Encoder options: ${JSON.stringify(options.options)}`);
+
     try {
       this.encoder = await Encoder.create(encoderCodec, options);
       logger.info(`Created encoder: ${encoderCodec}`);
@@ -316,19 +318,17 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
   private async selectEncoderCodec(codecName: string): Promise<{ encoderCodec: any; isHardware: boolean }> {
     const hwPref = this.config?.hardwareAcceleration;
 
-    // Hardware encoding via HardwareContext requires proper GPU setup (CUDA, QSV with working drivers)
-    // VAAPI requires uploading frames to GPU memory which adds complexity
-    // For now, only try hardware when explicitly requested and drivers are known to work
-    const shouldTryHardware = hwPref === 'prefer-hardware';
+    // Use the unified hardware detection system which respects webcodecs-config.js
+    const bestEncoder = getBestEncoderSync(codecName as any, hwPref);
 
-    if (shouldTryHardware) {
+    if (bestEncoder.isHardware && bestEncoder.hwaccel) {
       try {
-        // Use pooled hardware context instead of creating new one
-        this.hardware = acquireHardwareContext();
+        // Use pooled hardware context
+        this.hardware = acquireHardwareContext(bestEncoder.hwaccel);
         if (this.hardware) {
           const hwCodec = this.hardware.getEncoderCodec(codecName as any);
           if (hwCodec) {
-            logger.info(`Using hardware encoder: ${hwCodec.name ?? hwCodec} (${this.hardware.deviceTypeName})`);
+            logger.info(`Using hardware encoder: ${bestEncoder.encoder} (${this.hardware.deviceTypeName})`);
             return { encoderCodec: hwCodec, isHardware: true };
           }
         }
@@ -336,6 +336,8 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
         releaseHardwareContext(this.hardware);
         this.hardware = null;
       }
+      // Fall through to software if hardware failed
+      logger.warn(`Hardware encoder ${bestEncoder.encoder} failed, falling back to software`);
     }
 
     const softwareCodec = getSoftwareEncoder(codecName);
@@ -370,7 +372,12 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     }
 
     // Explicit preset overrides codec defaults when supported
-    if (qualityOverrides.preset) {
+    // Note: Different encoders use different preset names:
+    // - x264/x265: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
+    // - NVENC: p1-p7 (or fast, medium, slow)
+    // - QSV: veryfast, faster, fast, medium, slow, slower, veryslow
+    // We only apply user preset if no hardware (software encoder) to avoid compatibility issues
+    if (qualityOverrides.preset && !hwType) {
       options.preset = qualityOverrides.preset;
     }
 
@@ -416,15 +423,23 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
 
   private configureX26xOptions(options: Record<string, string | number>, hwType?: string): void {
     if (this.config?.latencyMode === 'realtime') {
-      if (hwType === 'qsv') {
+      if (hwType === 'cuda') {
+        // NVENC presets: p1 (fastest) to p7 (slowest), or 'fast'/'medium'/'slow'
+        options.preset = 'p1';
+      } else if (hwType === 'qsv') {
         options.preset = 'veryfast';
       } else if (!hwType) {
+        // Software x264/x265
         options.preset = 'ultrafast';
       }
     } else {
-      if (hwType === 'qsv') {
+      if (hwType === 'cuda') {
+        // NVENC: p4 is a good balance
+        options.preset = 'p4';
+      } else if (hwType === 'qsv') {
         options.preset = 'medium';
       } else if (!hwType) {
+        // Software x264/x265
         options.preset = 'medium';
       }
     }
