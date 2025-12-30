@@ -8,7 +8,11 @@
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
+import { createRequire } from 'module';
 import type { HardwareAccelerationMethod } from '../hardware/types.js';
+
+// Create require function for synchronous config loading
+const require = createRequire(import.meta.url);
 
 /**
  * Per-codec configuration overrides
@@ -115,25 +119,12 @@ async function loadConfig(): Promise<WebCodecsConfig> {
     return DEFAULT_CONFIG;
   }
 
-  // Try new unified config file first
-  const newConfigPath = path.join(process.cwd(), 'webcodecs-config.js');
-  if (fs.existsSync(newConfigPath)) {
+  // Try config file in current working directory
+  const configPath = path.join(process.cwd(), 'webcodecs-config.js');
+  if (fs.existsSync(configPath)) {
     try {
-      const mod = await import(pathToFileURL(newConfigPath).href);
+      const mod = await import(pathToFileURL(configPath).href);
       const raw = mod?.default ?? mod?.webCodecsConfig ?? mod;
-      return sanitizeConfig(raw);
-    } catch {
-      // Fall through to legacy config
-    }
-  }
-
-  // Fallback: try legacy ffmpeg-quality.js for backwards compatibility
-  const legacyConfigPath = process.env.WEB_CODECS_FFMPEG_QUALITY
-    ?? path.join(process.cwd(), 'ffmpeg-quality.js');
-  if (fs.existsSync(legacyConfigPath)) {
-    try {
-      const mod = await import(pathToFileURL(legacyConfigPath).href);
-      const raw = mod?.default ?? mod?.ffmpegQuality ?? mod;
       return sanitizeConfig(raw);
     } catch {
       // Fall through to defaults
@@ -154,11 +145,50 @@ export async function getConfig(): Promise<WebCodecsConfig> {
 }
 
 /**
- * Get configuration synchronously (returns cached or empty)
- * Call getConfig() first to ensure config is loaded
+ * Load configuration synchronously using require
+ */
+function loadConfigSync(): WebCodecsConfig {
+  // Check for config file path in env
+  if (process.env.WEBCODECS_CONFIG) {
+    const configPath = process.env.WEBCODECS_CONFIG;
+    if (fs.existsSync(configPath)) {
+      try {
+        // Clear require cache to allow reloading
+        delete require.cache[require.resolve(configPath)];
+        const mod = require(configPath);
+        const raw = mod?.default ?? mod?.webCodecsConfig ?? mod;
+        return sanitizeConfig(raw);
+      } catch {
+        // Fall through to defaults
+      }
+    }
+    return DEFAULT_CONFIG;
+  }
+
+  // Try config file in current working directory
+  const configPath = path.join(process.cwd(), 'webcodecs-config.js');
+  if (fs.existsSync(configPath)) {
+    try {
+      delete require.cache[require.resolve(configPath)];
+      const mod = require(configPath);
+      const raw = mod?.default ?? mod?.webCodecsConfig ?? mod;
+      return sanitizeConfig(raw);
+    } catch {
+      // Fall through to defaults
+    }
+  }
+
+  return DEFAULT_CONFIG;
+}
+
+/**
+ * Get configuration synchronously (loads config if not cached)
  */
 export function getConfigSync(): WebCodecsConfig {
-  return cachedConfig ?? DEFAULT_CONFIG;
+  if (cachedConfig === null) {
+    cachedConfig = loadConfigSync();
+  }
+  return cachedConfig;
 }
 
 /**

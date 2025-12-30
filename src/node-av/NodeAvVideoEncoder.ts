@@ -45,7 +45,7 @@ import {
   convertAnnexBToAvcc,
 } from '../utils/avc.js';
 import { acquireHardwareContext, releaseHardwareContext } from '../utils/hardware-pool.js';
-import { getFfmpegQualityOverrides } from '../config/ffmpeg-quality.js';
+import { getQualityConfig } from '../config/webcodecs-config.js';
 
 const logger = createLogger('NodeAvVideoEncoder');
 
@@ -317,27 +317,36 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
 
   private async selectEncoderCodec(codecName: string): Promise<{ encoderCodec: any; isHardware: boolean }> {
     const hwPref = this.config?.hardwareAcceleration;
+    const width = this.config?.width ?? 0;
+    const height = this.config?.height ?? 0;
 
     // Use the unified hardware detection system which respects webcodecs-config.js
     const bestEncoder = getBestEncoderSync(codecName as any, hwPref);
 
     if (bestEncoder.isHardware && bestEncoder.hwaccel) {
-      try {
-        // Use pooled hardware context
-        this.hardware = acquireHardwareContext(bestEncoder.hwaccel);
-        if (this.hardware) {
-          const hwCodec = this.hardware.getEncoderCodec(codecName as any);
-          if (hwCodec) {
-            logger.info(`Using hardware encoder: ${bestEncoder.encoder} (${this.hardware.deviceTypeName})`);
-            return { encoderCodec: hwCodec, isHardware: true };
+      // Check if resolution meets hardware encoder minimum requirements
+      // VAAPI/QSV have known minimum constraints that vary by codec
+      const minSize = this.getHardwareMinResolution(bestEncoder.hwaccel, codecName);
+      if (width < minSize.width || height < minSize.height) {
+        logger.info(`Resolution ${width}x${height} below hardware minimum ${minSize.width}x${minSize.height}, using software encoder`);
+      } else {
+        try {
+          // Use pooled hardware context
+          this.hardware = acquireHardwareContext(bestEncoder.hwaccel);
+          if (this.hardware) {
+            const hwCodec = this.hardware.getEncoderCodec(codecName as any);
+            if (hwCodec) {
+              logger.info(`Using hardware encoder: ${bestEncoder.encoder} (${this.hardware.deviceTypeName})`);
+              return { encoderCodec: hwCodec, isHardware: true };
+            }
           }
+        } catch {
+          releaseHardwareContext(this.hardware);
+          this.hardware = null;
         }
-      } catch {
-        releaseHardwareContext(this.hardware);
-        this.hardware = null;
+        // Fall through to software if hardware failed
+        logger.warn(`Hardware encoder ${bestEncoder.encoder} failed, falling back to software`);
       }
-      // Fall through to software if hardware failed
-      logger.warn(`Hardware encoder ${bestEncoder.encoder} failed, falling back to software`);
     }
 
     const softwareCodec = getSoftwareEncoder(codecName);
@@ -345,12 +354,36 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     return { encoderCodec: softwareCodec as FFEncoderCodec, isHardware: false };
   }
 
+  /**
+   * Get minimum resolution requirements for hardware encoders
+   * These are known constraints from hardware encoder specifications
+   */
+  private getHardwareMinResolution(hwaccel: string, codec: string): { width: number; height: number } {
+    // VAAPI constraints (Intel/AMD)
+    if (hwaccel === 'vaapi') {
+      if (codec === 'h264') return { width: 128, height: 128 };
+      if (codec === 'hevc' || codec === 'h265') return { width: 130, height: 128 };
+      if (codec === 'vp8' || codec === 'vp9') return { width: 128, height: 128 };
+      if (codec === 'av1') return { width: 128, height: 128 };
+    }
+    // QSV constraints (Intel)
+    if (hwaccel === 'qsv') {
+      return { width: 128, height: 128 };
+    }
+    // NVENC typically supports smaller sizes
+    if (hwaccel === 'nvenc') {
+      return { width: 32, height: 32 };
+    }
+    // Default: no minimum constraint
+    return { width: 1, height: 1 };
+  }
+
   private buildEncoderOptions(codecName: string, framerate: number, gopSize: number): Record<string, any> {
     const options: Record<string, string | number> = {};
     const isVpCodec = codecName === 'vp8' || codecName === 'vp9';
     const isAv1 = codecName === 'av1';
     const hwType = this.hardware?.deviceTypeName;
-    const qualityOverrides = getFfmpegQualityOverrides(codecName);
+    const qualityOverrides = getQualityConfig(codecName);
 
     // Codec-specific options
     if (isVpCodec) {

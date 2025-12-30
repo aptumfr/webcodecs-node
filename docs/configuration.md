@@ -100,10 +100,10 @@ encoder.configure({
 
 `crf` and `preset` are **extensions** (not part of the WebCodecs spec). They are loaded globally from a JS file and passed to FFmpeg when supported.
 
-Edit `ffmpeg-quality.js` in the project root:
+Edit `webcodecs-config.js` in the project root:
 
 ```javascript
-export default {
+module.exports = {
   // Global overrides:
   // crf: 28,
   // preset: 'veryfast',
@@ -113,12 +113,15 @@ export default {
   //   h264: { crf: 30, preset: 'veryfast' },
   //   hevc: { crf: 28, preset: 'medium' },
   // },
+
+  // Hardware acceleration priority (optional):
+  // hwaccel: ['nvenc', 'qsv', 'vaapi'],
 };
 ```
 
 **Notes:**
 - If the file is missing, no overrides are applied.
-- The file is loaded from `process.cwd()` or from `WEB_CODECS_FFMPEG_QUALITY`.
+- The file is loaded from `process.cwd()` or from `WEBCODECS_CONFIG` env var.
 
 ---
 
@@ -147,16 +150,16 @@ The `alpha` option controls how transparent pixels are handled during encoding.
 
 ## Output Bitstream Format
 
-By default the encoders emit Annex B (video) and ADTS/OGG (audio) bitstreams. If you need MP4-style payloads (length-prefixed NAL units, raw AAC frames) you can opt-in via the `format` config field.
+By default the video encoder emits MP4-style payloads (length-prefixed NAL units) with `decoderConfig.description`. Audio encoders default to ADTS/OGG bitstreams, with an option for raw AAC frames.
 
 ### VideoEncoder `format`
 
 | Value | Description |
 |-------|-------------|
-| `'annexb'` (default) | Emit Annex B/IVF bitstreams (same as before). |
-| `'mp4'` | Convert Annex B output into length-prefixed avcC/hvcc samples and include `decoderConfig.description`. |
+| `'mp4'` (default) | Emit length-prefixed avcC/hvcc samples with `decoderConfig.description` for MP4 muxing. |
+| `'annexb'` | Emit raw Annex B bitstreams with start codes (for raw streaming or ffmpeg piping). |
 
-When `format: 'mp4'` is set the encoder automatically extracts SPS/PPS/VPS from keyframes and exposes them in metadata so an MP4 muxer can use them.
+With the default `format: 'mp4'`, the encoder automatically extracts SPS/PPS/VPS from keyframes and exposes them in metadata so an MP4 muxer can use them.
 
 ### AudioEncoder `format`
 

@@ -50,6 +50,23 @@ function collectHwaccels(): HardwareAccelerationMethod[] {
     for (const deviceType of available) {
       const mapped = DEVICE_TYPE_MAP[deviceType];
       if (mapped) {
+        // Verify the hardware context can actually be created at runtime
+        // listAvailable() returns compile-time support, not runtime availability
+        let ctx: ReturnType<typeof HardwareContext.create> | null = null;
+        try {
+          ctx = HardwareContext.create(deviceType as Parameters<typeof HardwareContext.create>[0]);
+          if (!ctx) continue; // Context creation failed - skip this method
+          // Context created successfully - this hardware is actually available
+        } catch {
+          // Context creation threw - hardware not actually available
+          continue;
+        } finally {
+          // Clean up the test context to avoid resource leaks
+          if (ctx && typeof (ctx as any).unref === 'function') {
+            (ctx as any).unref();
+          }
+        }
+
         methods.push(mapped);
         // Add implied methods (e.g., CUDA implies NVENC/NVDEC)
         const implied = IMPLIED_METHODS[mapped];

@@ -32,6 +32,19 @@ import type {
 // Re-export types for backwards compatibility
 export type { VideoPixelFormat, VideoFrameBufferInit, VideoFrameCopyToOptions, VideoFrameInit };
 
+/**
+ * VideoFrameMetadata interface per W3C WebCodecs spec
+ * https://w3c.github.io/webcodecs/video_frame_metadata_registry.html
+ *
+ * Note: This is a stub implementation. The full metadata registry includes:
+ * - rtpTimestamp: For WebRTC media synchronization
+ * - rotation: Frame orientation (0, 90, 180, 270)
+ * - flip: Whether to flip the frame
+ */
+export interface VideoFrameMetadata {
+  // Currently returns empty object - metadata fields will be added as needed
+}
+
 // Import type guards from utils
 import {
   isImageDataLike,
@@ -443,6 +456,18 @@ export class VideoFrame {
     const height = rect?.height ?? this._visibleRect.height;
 
     return getFrameAllocationSize(format, width, height);
+  }
+
+  /**
+   * Returns metadata associated with this VideoFrame.
+   * Per W3C WebCodecs spec: https://w3c.github.io/webcodecs/video_frame_metadata_registry.html
+   *
+   * Note: Currently returns an empty object. Metadata fields like rtpTimestamp,
+   * rotation, and flip will be added as use cases require them.
+   */
+  metadata(): VideoFrameMetadata {
+    this._checkNotClosed();
+    return {};
   }
 
   /**

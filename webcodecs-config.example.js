@@ -18,7 +18,7 @@ export default {
 
   // Global encoder preset (speed vs compression tradeoff)
   // Options: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
-  // crf: 'medium',
+  // preset: 'medium',
 
   // ============================================================================
   // Hardware Acceleration Priority

@@ -57,15 +57,19 @@ Configure the encoder. Must be called before encoding.
 **VideoEncoderConfig:**
 | Property | Type | Required | Description |
 |----------|------|----------|-------------|
-| `codec` | string | Yes | Codec string (e.g., 'avc1.42001E', 'vp9') |
+| `codec` | string | Yes | Codec string (e.g., 'avc1.42001E', 'vp9', 'av1') |
 | `width` | number | Yes | Frame width in pixels |
 | `height` | number | Yes | Frame height in pixels |
+| `displayWidth` | number | No | Display width (for non-square pixels) |
+| `displayHeight` | number | No | Display height (for non-square pixels) |
 | `bitrate` | number | No | Target bitrate in bits/second |
 | `framerate` | number | No | Target framerate |
 | `bitrateMode` | 'constant' \| 'variable' \| 'quantizer' | No | Bitrate control mode |
 | `alpha` | 'discard' \| 'keep' | No | Alpha channel handling |
 | `latencyMode` | 'quality' \| 'realtime' | No | Latency vs quality tradeoff |
 | `hardwareAcceleration` | 'no-preference' \| 'prefer-hardware' \| 'prefer-software' | No | Hardware acceleration preference |
+| `scalabilityMode` | string | No | SVC scalability mode (e.g., 'L1T2') |
+| `format` | 'mp4' \| 'annexb' | No | Output format: 'mp4' (default) for length-prefixed, 'annexb' for raw bitstreams |
 | `maxQueueSize` | number | No | Max pending frames before QuotaExceededError. Auto-calculated from resolution if not set (~300MB target memory). |
 
 #### `encode(frame: VideoFrame, options?: VideoEncoderEncodeOptions): void`
@@ -124,7 +128,13 @@ Check if a configuration is supported.
 | `codec` | string | Yes | Codec string |
 | `codedWidth` | number | No | Coded frame width |
 | `codedHeight` | number | No | Coded frame height |
+| `displayAspectWidth` | number | No | Display aspect ratio width |
+| `displayAspectHeight` | number | No | Display aspect ratio height |
 | `description` | BufferSource | No | Codec-specific data (e.g., SPS/PPS for H.264) |
+| `colorSpace` | VideoColorSpaceInit | No | Color space configuration |
+| `hardwareAcceleration` | 'no-preference' \| 'prefer-hardware' \| 'prefer-software' | No | Hardware acceleration preference |
+| `optimizeForLatency` | boolean | No | Optimize for low latency decoding |
+| `outputFormat` | VideoPixelFormat | No | Preferred output pixel format |
 | `maxQueueSize` | number | No | Max pending chunks before QuotaExceededError. Auto-calculated from resolution if dimensions provided (~300MB target memory). |
 
 #### `decode(chunk: EncodedVideoChunk): void`
@@ -174,7 +184,10 @@ new AudioEncoder(init: AudioEncoderInit)
 | `codec` | string | Yes | Codec string (e.g., 'opus', 'mp4a.40.2') |
 | `sampleRate` | number | Yes | Sample rate in Hz |
 | `numberOfChannels` | number | Yes | Number of audio channels |
-| `bitrate` | number | No | Target bitrate |
+| `bitrate` | number | No | Target bitrate in bits/second |
+| `bitrateMode` | 'constant' \| 'variable' | No | Bitrate control mode |
+| `latencyMode` | 'quality' \| 'realtime' | No | Latency vs quality tradeoff |
+| `format` | 'adts' \| 'aac' | No | Output format: 'adts' (default) for ADTS headers, 'aac' for raw AAC frames |
 
 #### `encode(data: AudioData): void`
 
@@ -395,6 +408,10 @@ new VideoFrame(data: BufferSource, init: VideoFrameBufferInit)
 #### `allocationSize(options?: VideoFrameCopyToOptions): number`
 
 Get buffer size needed for copyTo.
+
+#### `metadata(): VideoFrameMetadata`
+
+Returns metadata associated with this VideoFrame. Currently returns an empty object as metadata fields (like `rtpTimestamp` for WebRTC) will be added as needed per W3C spec.
 
 #### `copyTo(destination: BufferSource, options?: VideoFrameCopyToOptions): Promise<PlaneLayout[]>`
 

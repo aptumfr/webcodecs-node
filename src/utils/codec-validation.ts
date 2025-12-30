@@ -53,24 +53,36 @@ export function validateVideoCodec(codec: string): CodecValidationResult {
     return { valid: true, supported: false, error: 'VP8 codec must be lowercase "vp8"' };
   }
 
-  // VP9: must be fully qualified vp09.PP.LL.DD
+  // VP9: fully qualified vp09.PP.LL.DD or shorthand "vp9"
   if (codec.startsWith('vp09.')) {
     return validateVp9Codec(codec);
   }
 
-  // Ambiguous "vp9" without profile - not accepted per WebCodecs spec
-  if (codec.toLowerCase() === 'vp9') {
-    return { valid: true, supported: false, error: 'Ambiguous VP9 codec, use vp09.PP.LL.DD format' };
+  // Accept shorthand "vp9" as alias for vp09.00.10.08 (profile 0, level 1.0, 8-bit)
+  // This matches browser behavior for developer convenience
+  if (codec === 'vp9') {
+    return { valid: true, supported: true };
   }
 
-  // AV1: av01.P.LLT.DD
+  // VP9 with wrong casing
+  if (codec.toLowerCase() === 'vp9' && codec !== 'vp9') {
+    return { valid: true, supported: false, error: 'VP9 codec must be lowercase "vp9"' };
+  }
+
+  // AV1: fully qualified av01.P.LLT.DD or shorthand "av1"
   if (codec.startsWith('av01.')) {
     return validateAv1Codec(codec);
   }
 
-  // Ambiguous "av1" without profile is not accepted
-  if (codec === 'av1' || codec.toLowerCase() === 'av1') {
-    return { valid: true, supported: false, error: 'Ambiguous AV1 codec, use av01.P.LLT.DD format' };
+  // Accept shorthand "av1" as alias for av01.0.01M.08 (Main profile, level 2.1, Main tier, 8-bit)
+  // This matches browser behavior for developer convenience
+  if (codec === 'av1') {
+    return { valid: true, supported: true };
+  }
+
+  // AV1 with wrong casing
+  if (codec.toLowerCase() === 'av1' && codec !== 'av1') {
+    return { valid: true, supported: false, error: 'AV1 codec must be lowercase "av1"' };
   }
 
   // Unknown codec
