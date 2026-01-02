@@ -5,7 +5,9 @@
  * an encode/decode cycle without storing intermediate chunks.
  */
 
-import { spawn } from 'child_process';
+import { VideoDecoder } from '../decoders/VideoDecoder.js';
+import { VideoEncoder } from '../encoders/VideoEncoder.js';
+import { VideoFrame } from '../core/VideoFrame.js';
 
 async function main() {
   console.log('WebCodecs Pipeline Demo');
@@ -16,57 +18,55 @@ async function main() {
   const frameCount = 30;
   const framerate = 30;
   const frameSize = width * height * 4; // RGBA
+  const frameDuration = Math.round(1_000_000 / framerate);
 
-  // Spawn encoder
-  const encoder = spawn('ffmpeg', [
-    '-hide_banner', '-loglevel', 'error',
-    '-f', 'rawvideo',
-    '-pix_fmt', 'rgba',
-    '-s', `${width}x${height}`,
-    '-r', String(framerate),
-    '-i', 'pipe:0',
-    '-c:v', 'libx264',
-    '-preset', 'ultrafast',
-    '-f', 'h264',
-    'pipe:1'
-  ]);
-
-  // Spawn decoder
-  const decoder = spawn('ffmpeg', [
-    '-hide_banner', '-loglevel', 'error',
-    '-f', 'h264',
-    '-i', 'pipe:0',
-    '-vsync', 'passthrough',
-    '-f', 'rawvideo',
-    '-pix_fmt', 'rgba',
-    'pipe:1'
-  ]);
-
-  // Pipe encoder output to decoder input
-  encoder.stdout.pipe(decoder.stdin);
-
-  // Track decoded frames
   let decodedFrameCount = 0;
-  let buffer = Buffer.alloc(0);
 
-  decoder.stdout.on('data', (data: Buffer) => {
-    buffer = Buffer.concat([buffer, data]);
-    while (buffer.length >= frameSize) {
+  const decoder = new VideoDecoder({
+    output: (frame) => {
       decodedFrameCount++;
-      const timestamp = ((decodedFrameCount - 1) * 1_000_000) / framerate;
-      console.log(`Decoded frame ${decodedFrameCount}: ${width}x${height}, timestamp=${timestamp}µs`);
-      buffer = buffer.subarray(frameSize);
-    }
+      console.log(`Decoded frame ${decodedFrameCount}: ${frame.codedWidth}x${frame.codedHeight}, timestamp=${frame.timestamp}µs`);
+      frame.close();
+    },
+    error: (err) => console.error('Decoder error:', err),
   });
 
-  encoder.stderr.on('data', (d) => console.error('Encoder:', d.toString()));
-  decoder.stderr.on('data', (d) => console.error('Decoder:', d.toString()));
+  decoder.configure({
+    codec: 'avc1.42001E',
+    codedWidth: width,
+    codedHeight: height,
+    outputFormat: 'RGBA',
+  });
+
+  const encoder = new VideoEncoder({
+    output: (chunk) => {
+      try {
+        decoder.decode(chunk);
+      } catch (err) {
+        console.error('Decoder decode error:', err);
+      }
+    },
+    error: (err) => console.error('Encoder error:', err),
+  });
+
+  encoder.configure({
+    codec: 'avc1.42001E',
+    width,
+    height,
+    framerate,
+    bitrate: 1_000_000,
+    latencyMode: 'realtime',
+    format: 'annexb',
+  });
 
   console.log(`Encoding ${frameCount} frames...`);
 
-  // Generate and encode frames
   for (let i = 0; i < frameCount; i++) {
-    const frameData = Buffer.alloc(frameSize);
+    while (encoder.encodeQueueSize >= 50) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    const frameData = new Uint8Array(frameSize);
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
         const idx = (y * width + x) * 4;
@@ -76,21 +76,28 @@ async function main() {
         frameData[idx + 3] = 255;                // A
       }
     }
-    encoder.stdin.write(frameData);
+
+    const frame = new VideoFrame(frameData, {
+      format: 'RGBA',
+      codedWidth: width,
+      codedHeight: height,
+      timestamp: i * frameDuration,
+    });
+
+    encoder.encode(frame, { keyFrame: i === 0 });
+    frame.close();
   }
 
-  encoder.stdin.end();
+  await encoder.flush();
+  encoder.close();
 
-  // Wait for completion
-  await new Promise<void>((resolve) => {
-    decoder.on('close', () => {
-      console.log(`\n=== Results ===`);
-      console.log(`Input frames:  ${frameCount}`);
-      console.log(`Output frames: ${decodedFrameCount}`);
-      console.log(`Match: ${frameCount === decodedFrameCount ? 'YES ✓' : 'NO ✗'}`);
-      resolve();
-    });
-  });
+  await decoder.flush();
+  decoder.close();
+
+  console.log(`\n=== Results ===`);
+  console.log(`Input frames:  ${frameCount}`);
+  console.log(`Output frames: ${decodedFrameCount}`);
+  console.log(`Match: ${frameCount === decodedFrameCount ? 'YES ✓' : 'NO ✗'}`);
 }
 
 main().catch(console.error);

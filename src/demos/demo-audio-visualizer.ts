@@ -10,12 +10,16 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { spawn } from 'child_process';
 
 import { createCanvas, getRawPixels } from '../canvas/index.js';
 import type { Canvas } from 'skia-canvas';
 import { VideoEncoder } from '../encoders/VideoEncoder.js';
+import { AudioEncoder } from '../encoders/AudioEncoder.js';
 import { VideoFrame } from '../core/VideoFrame.js';
+import { AudioData } from '../core/AudioData.js';
+import type { EncodedVideoChunk } from '../core/EncodedVideoChunk.js';
+import type { EncodedAudioChunk } from '../core/EncodedAudioChunk.js';
+import { muxChunks } from '../containers/index.js';
 
 const WIDTH = 800;
 const HEIGHT = 600;
@@ -198,31 +202,6 @@ function drawLabels(
   }
 }
 
-async function muxAudioVideo(
-  h264Path: string,
-  pcmPath: string,
-  outputPath: string,
-  sampleRate: number,
-  channels: number
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const ffmpeg = spawn('ffmpeg', [
-      '-y',
-      '-f', 'h264', '-r', String(FRAME_RATE), '-i', h264Path,
-      '-f', 'f32le', '-ar', String(sampleRate), '-ac', String(channels), '-i', pcmPath,
-      '-c:v', 'copy',
-      '-c:a', 'aac', '-b:a', '128k',
-      '-shortest',
-      outputPath,
-    ]);
-    ffmpeg.stderr.on('data', () => {});
-    ffmpeg.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`ffmpeg mux failed: ${code}`));
-    });
-  });
-}
-
 async function main(): Promise<void> {
   console.log('╔═══════════════════════════════════════════════════════════════╗');
   console.log('║              Audio Visualizer Demo                            ║');
@@ -241,10 +220,21 @@ async function main(): Promise<void> {
   const canvas = createCanvas({ width: WIDTH, height: HEIGHT });
   const ctx = canvas.getContext('2d');
 
+  // Collect encoded chunks
+  const videoChunks: EncodedVideoChunk[] = [];
+  const audioChunks: EncodedAudioChunk[] = [];
+  let videoDescription: Uint8Array | undefined;
+  let audioDescription: Uint8Array | undefined;
+
   // Video encoder
-  const videoBuffers: Uint8Array[] = [];
   const videoEncoder = new VideoEncoder({
-    output: (chunk) => videoBuffers.push(chunk._buffer),
+    output: (chunk, metadata) => {
+      videoChunks.push(chunk);
+      if (!videoDescription && metadata?.decoderConfig?.description) {
+        const desc = metadata.decoderConfig.description;
+        videoDescription = desc instanceof Uint8Array ? desc : new Uint8Array(desc as ArrayBuffer);
+      }
+    },
     error: (err) => console.error('Video encoder error:', err),
   });
 
@@ -256,11 +246,27 @@ async function main(): Promise<void> {
     bitrate: 4_000_000,
     latencyMode: 'quality',
     hardwareAcceleration: 'prefer-hardware',
-    format: 'annexb',
+    format: 'mp4',
   });
 
-  // Collect raw PCM samples (will be encoded by ffmpeg during mux)
-  const audioSamples: Float32Array[] = [];
+  const audioEncoder = new AudioEncoder({
+    output: (chunk, metadata) => {
+      audioChunks.push(chunk);
+      if (!audioDescription && metadata?.decoderConfig?.description) {
+        const desc = metadata.decoderConfig.description;
+        audioDescription = desc instanceof Uint8Array ? desc : new Uint8Array(desc as ArrayBuffer);
+      }
+    },
+    error: (err) => console.error('Audio encoder error:', err),
+  });
+
+  audioEncoder.configure({
+    codec: 'mp4a.40.2', // AAC-LC
+    sampleRate: SAMPLE_RATE,
+    numberOfChannels: AUDIO_CHANNELS,
+    bitrate: 128_000,
+    format: 'aac',
+  });
 
   console.log(`  Resolution: ${WIDTH}x${HEIGHT}`);
   console.log(`  Duration: ${DURATION_SECONDS}s`);
@@ -271,12 +277,13 @@ async function main(): Promise<void> {
   let totalSamples = 0;
 
   for (let i = 0; i < FRAME_COUNT; i++) {
-    // Backpressure: wait if encoder queue is getting full
-    while (videoEncoder.encodeQueueSize >= 50) {
+    // Backpressure: wait if encoder queues are getting full
+    while (videoEncoder.encodeQueueSize >= 50 || audioEncoder.encodeQueueSize >= 50) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
 
     const time = i / FRAME_RATE;
+    const timestamp = i * FRAME_DURATION_US;
 
     // Animate amplitudes over time
     for (let f = 0; f < audioState.amplitudes.length; f++) {
@@ -290,8 +297,18 @@ async function main(): Promise<void> {
       SAMPLE_RATE,
       totalSamples
     );
-    audioSamples.push(samples);
     totalSamples += SAMPLES_PER_FRAME;
+
+    const audioData = new AudioData({
+      format: 'f32',
+      sampleRate: SAMPLE_RATE,
+      numberOfFrames: SAMPLES_PER_FRAME,
+      numberOfChannels: AUDIO_CHANNELS,
+      timestamp,
+      data: samples,
+    });
+    audioEncoder.encode(audioData);
+    audioData.close();
 
     // Draw visualization
     ctx.fillStyle = COLORS.background;
@@ -330,7 +347,7 @@ async function main(): Promise<void> {
       format: 'RGBA',
       codedWidth: WIDTH,
       codedHeight: HEIGHT,
-      timestamp: i * FRAME_DURATION_US,
+      timestamp,
     });
 
     videoEncoder.encode(frame, { keyFrame: i % 30 === 0 });
@@ -345,34 +362,39 @@ async function main(): Promise<void> {
   }
 
   await videoEncoder.flush();
+  await audioEncoder.flush();
   videoEncoder.close();
+  audioEncoder.close();
 
   const encodeTime = Date.now() - startTime;
   console.log(`\n  Encoding complete: ${encodeTime}ms`);
 
-  // Write temporary files
-  const h264Path = path.join(OUTPUT_DIR, 'temp.h264');
-  const pcmPath = path.join(OUTPUT_DIR, 'temp.pcm');
-
-  fs.writeFileSync(h264Path, Buffer.concat(videoBuffers.map(b => Buffer.from(b))));
-
-  // Write raw PCM audio (float32 little-endian)
-  const totalAudioBytes = audioSamples.reduce((sum, s) => sum + s.byteLength, 0);
-  const pcmBuffer = Buffer.alloc(totalAudioBytes);
-  let offset = 0;
-  for (const samples of audioSamples) {
-    Buffer.from(samples.buffer).copy(pcmBuffer, offset);
-    offset += samples.byteLength;
-  }
-  fs.writeFileSync(pcmPath, pcmBuffer);
-
-  // Mux audio and video
   console.log('  Muxing audio and video...');
-  await muxAudioVideo(h264Path, pcmPath, OUTPUT_VIDEO, SAMPLE_RATE, AUDIO_CHANNELS);
-
-  // Clean up temp files
-  fs.unlinkSync(h264Path);
-  fs.unlinkSync(pcmPath);
+  await muxChunks({
+    path: OUTPUT_VIDEO,
+    video: {
+      config: {
+        codec: 'avc1.64001E',
+        codedWidth: WIDTH,
+        codedHeight: HEIGHT,
+        framerate: FRAME_RATE,
+        bitrate: 4_000_000,
+        description: videoDescription,
+      },
+      chunks: videoChunks,
+    },
+    audio: {
+      config: {
+        codec: 'mp4a.40.2',
+        sampleRate: SAMPLE_RATE,
+        numberOfChannels: AUDIO_CHANNELS,
+        bitrate: 128_000,
+        description: audioDescription,
+      },
+      chunks: audioChunks,
+    },
+    forceBackend: 'node-av',
+  });
 
   const stats = fs.statSync(OUTPUT_VIDEO);
   console.log(`\n  Output: ${OUTPUT_VIDEO}`);

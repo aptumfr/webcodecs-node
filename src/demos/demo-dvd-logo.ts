@@ -7,12 +7,13 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { spawn } from 'child_process';
 
 import { createCanvas, getRawPixels } from '../canvas/index.js';
 import type { Canvas } from 'skia-canvas';
 import { VideoEncoder } from '../encoders/VideoEncoder.js';
 import { VideoFrame } from '../core/VideoFrame.js';
+import type { EncodedVideoChunk } from '../core/EncodedVideoChunk.js';
+import { muxChunks } from '../containers/index.js';
 
 const WIDTH = 640;
 const HEIGHT = 480;
@@ -107,23 +108,6 @@ function updateLogo(state: LogoState): boolean {
   return colorChanged;
 }
 
-function muxH264ToMp4(h264Data: Buffer, outputPath: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const ffmpeg = spawn('ffmpeg', [
-      '-y',
-      '-f', 'h264',
-      '-r', String(FRAME_RATE),
-      '-i', 'pipe:0',
-      '-c:v', 'copy',
-      outputPath,
-    ]);
-    ffmpeg.stdin.on('error', reject);
-    ffmpeg.stderr.on('data', () => {});
-    ffmpeg.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg mux failed: ${code}`))));
-    ffmpeg.stdin.end(h264Data);
-  });
-}
-
 async function main(): Promise<void> {
   console.log('╔═══════════════════════════════════════════════════════════════╗');
   console.log('║              Bouncing DVD Logo Demo                           ║');
@@ -145,12 +129,19 @@ async function main(): Promise<void> {
   const ctx = canvas.getContext('2d');
 
   // Collect encoded chunks
-  const encodedBuffers: Uint8Array[] = [];
+  const encodedChunks: EncodedVideoChunk[] = [];
+  let videoDescription: Uint8Array | undefined;
   let bounceCount = 0;
   let cornerHits = 0;
 
   const encoder = new VideoEncoder({
-    output: (chunk) => encodedBuffers.push(chunk._buffer),
+    output: (chunk, metadata) => {
+      encodedChunks.push(chunk);
+      if (!videoDescription && metadata?.decoderConfig?.description) {
+        const desc = metadata.decoderConfig.description;
+        videoDescription = desc instanceof Uint8Array ? desc : new Uint8Array(desc as ArrayBuffer);
+      }
+    },
     error: (err) => console.error('Encoder error:', err),
   });
 
@@ -162,7 +153,7 @@ async function main(): Promise<void> {
     bitrate: 2_000_000,
     latencyMode: 'quality',
     hardwareAcceleration: 'prefer-hardware',
-    format: 'annexb',
+    format: 'mp4',
   });
 
   console.log(`  Resolution: ${WIDTH}x${HEIGHT}`);
@@ -230,9 +221,21 @@ async function main(): Promise<void> {
   console.log(`  Total bounces: ${bounceCount}`);
   console.log(`  Corner hits: ${cornerHits}`);
 
-  // Mux to MP4
-  const h264Payload = Buffer.concat(encodedBuffers.map((b) => Buffer.from(b)));
-  await muxH264ToMp4(h264Payload, OUTPUT_VIDEO);
+  await muxChunks({
+    path: OUTPUT_VIDEO,
+    video: {
+      config: {
+        codec: 'avc1.64001E',
+        codedWidth: WIDTH,
+        codedHeight: HEIGHT,
+        framerate: FRAME_RATE,
+        bitrate: 2_000_000,
+        description: videoDescription,
+      },
+      chunks: encodedChunks,
+    },
+    forceBackend: 'node-av',
+  });
 
   const stats = fs.statSync(OUTPUT_VIDEO);
   console.log(`\n  Output: ${OUTPUT_VIDEO}`);

@@ -13,10 +13,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { ImageDecoder } from '../index.js';
 
-// Create test images using FFmpeg
+const TEST_DIR = '/tmp/webcodecs-test-images';
+const FIXTURE_DIR = path.resolve('src/__tests__/fixtures');
+
+// Create test images using fixtures
 async function createTestImages(): Promise<void> {
-  const { execSync } = await import('child_process');
-  const testDir = '/tmp/webcodecs-test-images';
+  const testDir = TEST_DIR;
 
   // Create test directory
   if (!fs.existsSync(testDir)) {
@@ -25,25 +27,25 @@ async function createTestImages(): Promise<void> {
 
   console.log('Creating test images...\n');
 
-  // Create a simple PNG (red square)
-  execSync(`ffmpeg -y -f lavfi -i color=c=red:size=100x100:d=1 -frames:v 1 ${testDir}/test.png 2>/dev/null`);
-  console.log('  Created test.png (100x100 red square)');
+  const fixtures = [
+    'test.png',
+    'test.jpg',
+    'test.webp',
+    'test.gif',
+    'animated_multi.gif',
+    'test.bmp',
+  ];
 
-  // Create a JPEG (blue gradient)
-  execSync(`ffmpeg -y -f lavfi -i "gradients=size=200x150:c0=blue:c1=white:d=1" -frames:v 1 ${testDir}/test.jpg 2>/dev/null`);
-  console.log('  Created test.jpg (200x150 blue gradient)');
-
-  // Create a WebP (green circle on transparent)
-  execSync(`ffmpeg -y -f lavfi -i color=c=green:size=80x80:d=1 -frames:v 1 ${testDir}/test.webp 2>/dev/null`);
-  console.log('  Created test.webp (80x80 green square)');
-
-  // Create an animated GIF (3 frames, cycling colors)
-  execSync(`ffmpeg -y -f lavfi -i "color=c=red:size=50x50:d=0.5,format=rgb24[r];color=c=green:size=50x50:d=0.5,format=rgb24[g];color=c=blue:size=50x50:d=0.5,format=rgb24[b];[r][g][b]concat=n=3:v=1:a=0" -frames:v 3 ${testDir}/test.gif 2>/dev/null`);
-  console.log('  Created test.gif (50x50 animated, 3 frames)');
-
-  // Create a BMP
-  execSync(`ffmpeg -y -f lavfi -i color=c=yellow:size=64x64:d=1 -frames:v 1 ${testDir}/test.bmp 2>/dev/null`);
-  console.log('  Created test.bmp (64x64 yellow square)');
+  for (const file of fixtures) {
+    const src = path.join(FIXTURE_DIR, file);
+    const dest = path.join(testDir, file);
+    if (fs.existsSync(src)) {
+      fs.copyFileSync(src, dest);
+      console.log(`  Copied ${file}`);
+    } else {
+      console.log(`  Missing fixture: ${file}`);
+    }
+  }
 
   console.log('');
 }
@@ -144,7 +146,7 @@ async function main() {
   // Create test images
   await createTestImages();
 
-  const testDir = '/tmp/webcodecs-test-images';
+  const testDir = TEST_DIR;
 
   // Test each format
   const testCases = [
