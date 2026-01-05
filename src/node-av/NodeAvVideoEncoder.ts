@@ -266,7 +266,7 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
 
     this.configurePixelFormat(isHardware, options, codecName);
 
-    logger.debug(`Encoder options: ${JSON.stringify(options.options)}`);
+    logger.debug(`Encoder options: ${JSON.stringify(options.options)}, bitrate=${options.bitrate}`);
 
     try {
       this.encoder = await Encoder.create(encoderCodec, options);
@@ -568,6 +568,9 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
         options.preset = 'p1';
       } else if (hwType === 'qsv') {
         options.preset = 'veryfast';
+      } else if (hwType === 'vaapi') {
+        // VAAPI: lower quality = faster encoding, low QP for better quality
+        options.quality = '0';
       } else if (!hwType) {
         // Software x264/x265
         options.preset = 'ultrafast';
@@ -578,9 +581,34 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
         options.preset = 'p4';
       } else if (hwType === 'qsv') {
         options.preset = 'medium';
+      } else if (hwType === 'vaapi') {
+        // VAAPI: higher quality setting
+        options.quality = '4';
       } else if (!hwType) {
         // Software x264/x265
         options.preset = 'medium';
+      }
+    }
+
+    // Configure rate control based on hardware type and bitrate mode
+    const bitrate = this.config?.bitrate;
+    if (bitrate && this.config?.bitrateMode !== 'quantizer') {
+      if (hwType === 'vaapi') {
+        // VAAPI: Use CQP mode with low QP for high quality
+        // Note: node-av doesn't properly pass bitrate to VAAPI, so we use quality-based encoding
+        // QP 20 gives good quality (lower = higher quality, range 0-51)
+        options.qp = 20;
+      } else if (hwType === 'cuda') {
+        // NVENC: Use VBR mode
+        options.rc = 'vbr';
+      } else if (hwType === 'qsv') {
+        // QSV: Use VBR mode
+        options.preset = options.preset ?? 'medium';
+      } else {
+        // Software x264/x265: Set VBV maxrate and bufsize for proper bitrate control
+        // bufsize = 2x bitrate gives ~2 second buffer, good for streaming
+        options.maxrate = String(bitrate);
+        options.bufsize = String(bitrate * 2);
       }
     }
   }
