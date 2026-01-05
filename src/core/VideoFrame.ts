@@ -74,6 +74,7 @@ export class VideoFrame {
   private _duration: number | null;
   private _timestamp: number;
   private _colorSpace: VideoColorSpace;
+  private _inputLayout: PlaneLayout[] | null = null; // Layout from init, if provided
 
   get format(): VideoPixelFormat | null { return this._closed ? null : this._format; }
   get codedWidth(): number { return this._closed ? 0 : this._codedWidth; }
@@ -266,6 +267,8 @@ export class VideoFrame {
       this._colorSpace = new VideoColorSpace(
         this._getDefaultColorSpace(bufferInit.format, bufferInit.colorSpace)
       );
+      // Store input layout if provided (for non-standard memory layouts)
+      this._inputLayout = bufferInit.layout ?? null;
     } else if (isCanvasImageSource(dataOrImage)) {
       const frameInit = init as VideoFrameInit;
 
@@ -491,6 +494,7 @@ export class VideoFrame {
 
     const destFormat = options?.format ?? this._format;
     const rect = options?.rect;
+    const layout = options?.layout;
 
     const srcX = Math.floor(rect?.x ?? this._visibleRect.x);
     const srcY = Math.floor(rect?.y ?? this._visibleRect.y);
@@ -501,19 +505,89 @@ export class VideoFrame {
       throw new DOMException('Rect is out of bounds', 'ConstraintError');
     }
 
-    const requiredSize = getFrameAllocationSize(destFormat, srcW, srcH);
-    if (destArray.byteLength < requiredSize) {
+    // Validate layout if provided
+    const numPlanes = getPlaneCount(destFormat);
+    if (layout) {
+      if (layout.length !== numPlanes) {
+        throw new TypeError(`layout must have ${numPlanes} entries for format ${destFormat}, got ${layout.length}`);
+      }
+      // Validate that buffer is large enough for the provided layout
+      for (let p = 0; p < numPlanes; p++) {
+        const planeInfo = getPlaneInfo(destFormat, srcW, srcH, p);
+        const planeEnd = layout[p].offset + (planeInfo.height - 1) * layout[p].stride + planeInfo.width * planeInfo.bytesPerPixel;
+        if (planeEnd > destArray.byteLength) {
+          throw new TypeError(`destination buffer too small for layout: plane ${p} needs ${planeEnd} bytes`);
+        }
+      }
+    }
+
+    const requiredSize = layout ? 0 : getFrameAllocationSize(destFormat, srcW, srcH);
+    if (!layout && destArray.byteLength < requiredSize) {
       throw new TypeError(`destination buffer is too small (need ${requiredSize}, got ${destArray.byteLength})`);
     }
 
-    if (destFormat === this._format && srcX === 0 && srcY === 0 &&
+    // Fast path: no conversion, no clipping, no custom layout
+    if (!layout && destFormat === this._format && srcX === 0 && srcY === 0 &&
         srcW === this._codedWidth && srcH === this._codedHeight) {
       destArray.set(this._data);
       return this._getPlaneLayoutForSize(srcW, srcH, destFormat);
     }
 
+    // Copy with optional layout
+    if (layout) {
+      this._copyWithLayout(destArray, destFormat, srcX, srcY, srcW, srcH, layout);
+      return layout;
+    }
+
     this._copyWithConversion(destArray, destFormat, srcX, srcY, srcW, srcH);
     return this._getPlaneLayoutForSize(srcW, srcH, destFormat);
+  }
+
+  /**
+   * Copy to destination with custom layout (offsets and strides)
+   */
+  private _copyWithLayout(
+    dest: Uint8Array,
+    destFormat: VideoPixelFormat,
+    srcX: number,
+    srcY: number,
+    srcW: number,
+    srcH: number,
+    layout: PlaneLayout[]
+  ): void {
+    // First, convert to a temporary buffer if format conversion needed
+    let srcData: Uint8Array;
+    if (this._format === destFormat) {
+      srcData = this._data;
+    } else {
+      // Convert to temp buffer with packed layout, then copy to dest with custom layout
+      const tempSize = getFrameAllocationSize(destFormat, srcW, srcH);
+      const tempBuffer = new Uint8Array(tempSize);
+      this._copyWithConversion(tempBuffer, destFormat, srcX, srcY, srcW, srcH);
+      srcData = tempBuffer;
+      // Reset srcX/srcY since tempBuffer already has the clipped region
+      srcX = 0;
+      srcY = 0;
+    }
+
+    const numPlanes = getPlaneCount(destFormat);
+    let srcOffset = 0;
+
+    for (let p = 0; p < numPlanes; p++) {
+      const planeInfo = getPlaneInfo(destFormat, srcW, srcH, p);
+      const destOffset = layout[p].offset;
+      const destStride = layout[p].stride;
+      const srcStride = planeInfo.width * planeInfo.bytesPerPixel;
+
+      // Copy row by row with custom stride
+      for (let row = 0; row < planeInfo.height; row++) {
+        const srcRowOffset = srcOffset + row * srcStride;
+        const destRowOffset = destOffset + row * destStride;
+        dest.set(srcData.subarray(srcRowOffset, srcRowOffset + srcStride), destRowOffset);
+      }
+
+      srcOffset += srcStride * planeInfo.height;
+    }
   }
 
   private _copyWithConversion(

@@ -145,9 +145,23 @@ export class ImageTrackList {
     this._selectedIndex = index;
   }
 
+  /**
+   * Get track by index
+   * Per WebCodecs spec, this enables tracks[0] style access
+   */
+  get(index: number): ImageTrack | undefined {
+    return this._tracks[index];
+  }
+
   [Symbol.iterator](): Iterator<ImageTrack> {
     return this._tracks[Symbol.iterator]();
   }
+
+  /**
+   * Allow numeric index access (readonly)
+   * Note: For full bracket notation support, use .get(index)
+   */
+  [index: number]: ImageTrack | undefined;
 }
 
 // Supported image types (delegated to node-av)
@@ -369,7 +383,10 @@ export class ImageDecoder {
     const totalFrames = this._frames.length;
     this._visibleFrameCount = totalFrames;
     this._visibleAnimated = totalFrames > 1;
-    this._visibleRepetitionCount = this._repetitionCount || 1;
+    // Per WebCodecs spec: repetitionCount of 0 means loop infinitely
+    // Only use 1 (single play) as default if _repetitionCount is undefined/null
+    this._visibleRepetitionCount = this._repetitionCount === 0 ? Infinity :
+      (this._repetitionCount ?? 1);
   }
 
   private _parseExifOrientation(data: Uint8Array): number | null {
@@ -657,6 +674,12 @@ export class ImageDecoder {
     if (this._frames.length === 0) {
       throw new Error('No frames decoded');
     }
+
+    // Note: Per WebCodecs spec, preferAnimation affects track selection when
+    // an image has both animated and still representations. Most animated
+    // formats (GIF, APNG, WebP) only have a single animated representation,
+    // so preferAnimation has no effect on them. Full implementation would
+    // require format-specific logic to detect alternative representations.
   }
 
   get complete(): boolean { return this._complete; }

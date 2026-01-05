@@ -68,6 +68,73 @@ describe('VideoDecoder', () => {
 
       expect(support.supported).toBe(false);
     });
+
+    // Capability checks for outputFormat
+    it('should not support 10-bit output format with H.264', async () => {
+      const support = await VideoDecoder.isConfigSupported({
+        codec: 'avc1.42001E',
+        codedWidth: 640,
+        codedHeight: 480,
+        outputFormat: 'I420P10',
+      });
+
+      expect(support.supported).toBe(false);
+    });
+
+    it('should not support 10-bit output format with VP8', async () => {
+      const support = await VideoDecoder.isConfigSupported({
+        codec: 'vp8',
+        codedWidth: 640,
+        codedHeight: 480,
+        outputFormat: 'I420P10',
+      });
+
+      expect(support.supported).toBe(false);
+    });
+
+    it('should support 10-bit output format with HEVC', async () => {
+      const support = await VideoDecoder.isConfigSupported({
+        codec: 'hev1.1.6.L93.B0',
+        codedWidth: 1920,
+        codedHeight: 1080,
+        outputFormat: 'I420P10',
+      });
+
+      expect(support.supported).toBe(true);
+    });
+
+    it('should support 10-bit output format with VP9', async () => {
+      const support = await VideoDecoder.isConfigSupported({
+        codec: 'vp09.02.10.10',
+        codedWidth: 1920,
+        codedHeight: 1080,
+        outputFormat: 'I420P10',
+      });
+
+      expect(support.supported).toBe(true);
+    });
+
+    it('should support 10-bit output format with AV1', async () => {
+      const support = await VideoDecoder.isConfigSupported({
+        codec: 'av01.0.04M.10',
+        codedWidth: 1920,
+        codedHeight: 1080,
+        outputFormat: 'I420P10',
+      });
+
+      expect(support.supported).toBe(true);
+    });
+
+    it('should not support unsupported output format', async () => {
+      const support = await VideoDecoder.isConfigSupported({
+        codec: 'avc1.42001E',
+        codedWidth: 640,
+        codedHeight: 480,
+        outputFormat: 'INVALID_FORMAT' as any,
+      });
+
+      expect(support.supported).toBe(false);
+    });
   });
 
   describe('constructor', () => {
@@ -518,6 +585,89 @@ describe('VideoDecoder encode-decode roundtrip', () => {
     for (const frame of decodedFrames) {
       frame.close();
     }
+  }, 30000);
+
+  it('should pass displayAspectWidth/Height to output VideoFrame', async () => {
+    // Test the S1 fix: VideoDecoderConfig's displayAspectWidth/Height
+    // should be passed to output VideoFrame as displayWidth/displayHeight
+    const codedWidth = 64;
+    const codedHeight = 48; // 4:3 coded aspect
+    const displayAspectWidth = 64;
+    const displayAspectHeight = 36; // 16:9 display aspect
+
+    // Step 1: Encode a frame
+    const encodedChunks: EncodedVideoChunk[] = [];
+    let description: Uint8Array | undefined;
+
+    const encoder = new VideoEncoder({
+      output: (chunk, metadata) => {
+        encodedChunks.push(chunk);
+        if (metadata?.decoderConfig?.description) {
+          description = metadata.decoderConfig.description;
+        }
+      },
+      error: (err) => { throw err; },
+    });
+
+    encoder.configure({
+      codec: 'avc1.42001E',
+      width: codedWidth,
+      height: codedHeight,
+      bitrate: 500_000,
+      framerate: 30,
+    });
+
+    const data = new Uint8Array(codedWidth * codedHeight * 4);
+    data.fill(128); // Gray
+
+    const frame = new VideoFrame(data, {
+      format: 'RGBA',
+      codedWidth,
+      codedHeight,
+      timestamp: 0,
+    });
+
+    encoder.encode(frame, { keyFrame: true });
+    frame.close();
+
+    await encoder.flush();
+    encoder.close();
+
+    expect(encodedChunks.length).toBe(1);
+
+    // Step 2: Decode with display aspect dimensions
+    const decodedFrames: VideoFrame[] = [];
+
+    const decoder = new VideoDecoder({
+      output: (frame) => decodedFrames.push(frame),
+      error: (err) => { throw err; },
+    });
+
+    decoder.configure({
+      codec: 'avc1.42001E',
+      codedWidth,
+      codedHeight,
+      displayAspectWidth,
+      displayAspectHeight,
+      outputFormat: 'RGBA',
+      description,
+    });
+
+    decoder.decode(encodedChunks[0]);
+    await decoder.flush();
+    decoder.close();
+
+    expect(decodedFrames.length).toBe(1);
+
+    const decodedFrame = decodedFrames[0];
+    // Coded dimensions should match
+    expect(decodedFrame.codedWidth).toBe(codedWidth);
+    expect(decodedFrame.codedHeight).toBe(codedHeight);
+    // Display dimensions should be set from config
+    expect(decodedFrame.displayWidth).toBe(displayAspectWidth);
+    expect(decodedFrame.displayHeight).toBe(displayAspectHeight);
+
+    decodedFrame.close();
   }, 30000);
 });
 

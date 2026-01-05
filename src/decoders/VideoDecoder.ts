@@ -161,17 +161,59 @@ export class VideoDecoder extends WebCodecsEventTarget {
     // Validate config - throws TypeError for invalid configs per spec
     validateVideoDecoderConfig(config);
 
+    // Clone the config per WebCodecs spec
+    // Description is parsed and stored as Uint8Array if provided
+    const clonedConfig: VideoDecoderConfig = {
+      codec: config.codec,
+    };
+
+    // Copy optional properties if present
+    if (config.codedWidth !== undefined) clonedConfig.codedWidth = config.codedWidth;
+    if (config.codedHeight !== undefined) clonedConfig.codedHeight = config.codedHeight;
+    if (config.displayAspectWidth !== undefined) clonedConfig.displayAspectWidth = config.displayAspectWidth;
+    if (config.displayAspectHeight !== undefined) clonedConfig.displayAspectHeight = config.displayAspectHeight;
+    if (config.colorSpace !== undefined) clonedConfig.colorSpace = { ...config.colorSpace };
+    if (config.hardwareAcceleration !== undefined) clonedConfig.hardwareAcceleration = config.hardwareAcceleration;
+    if (config.optimizeForLatency !== undefined) clonedConfig.optimizeForLatency = config.optimizeForLatency;
+    if (config.outputFormat !== undefined) clonedConfig.outputFormat = config.outputFormat;
+    if (config.maxQueueSize !== undefined) clonedConfig.maxQueueSize = config.maxQueueSize;
+
+    // Parse description if provided (convert BufferSource to Uint8Array)
+    if (config.description !== undefined) {
+      try {
+        clonedConfig.description = toUint8Array(config.description);
+      } catch {
+        return { supported: false, config: clonedConfig };
+      }
+    }
+
     // Validate codec string format and check if supported
     const codecValidation = validateVideoCodec(config.codec);
     if (!codecValidation.supported) {
-      return { supported: false, config };
+      return { supported: false, config: clonedConfig };
+    }
+
+    // Validate displayAspectWidth/Height are positive integers if present
+    if (config.displayAspectWidth !== undefined) {
+      if (typeof config.displayAspectWidth !== 'number' ||
+          config.displayAspectWidth <= 0 ||
+          !Number.isInteger(config.displayAspectWidth)) {
+        return { supported: false, config: clonedConfig };
+      }
+    }
+    if (config.displayAspectHeight !== undefined) {
+      if (typeof config.displayAspectHeight !== 'number' ||
+          config.displayAspectHeight <= 0 ||
+          !Number.isInteger(config.displayAspectHeight)) {
+        return { supported: false, config: clonedConfig };
+      }
     }
 
     // Check outputFormat compatibility
     if (config.outputFormat) {
       // Validate the requested output format is supported
       if (!SUPPORTED_OUTPUT_FORMATS.includes(config.outputFormat)) {
-        return { supported: false, config };
+        return { supported: false, config: clonedConfig };
       }
 
       // Some formats have codec-specific limitations
@@ -187,12 +229,12 @@ export class VideoDecoder extends WebCodecsEventTarget {
         // Only HEVC, VP9, and AV1 support 10-bit content
         const supports10Bit = parsed.name === 'hevc' || parsed.name === 'vp9' || parsed.name === 'av1';
         if (!supports10Bit) {
-          return { supported: false, config };
+          return { supported: false, config: clonedConfig };
         }
       }
     }
 
-    return { supported: true, config };
+    return { supported: true, config: clonedConfig };
   }
 
   configure(config: VideoDecoderConfig): void {

@@ -785,5 +785,42 @@ describe('ImageDecoder', () => {
 
       decoder.close();
     });
+
+    it('should allow setting ImageTrack.selected to switch tracks', async () => {
+      // Test the S5 fix: ImageTrack.selected should be settable
+      const pngPath = findTestImage('test.png');
+      if (!pngPath) {
+        console.log('Skipping track selection test: no test image');
+        return;
+      }
+
+      const data = bufferToArrayBuffer(fs.readFileSync(pngPath));
+      const decoder = new ImageDecoder({
+        type: 'image/png',
+        data,
+      });
+
+      await decoder.completed;
+
+      const tracks = [...decoder.tracks];
+      expect(tracks.length).toBeGreaterThan(0);
+
+      // Get the first track
+      const track = tracks[0];
+      expect(track.selected).toBe(true);
+      expect(decoder.tracks.selectedIndex).toBe(0);
+
+      // For single-track images, deselecting should work
+      track.selected = false;
+      expect(track.selected).toBe(false);
+      expect(decoder.tracks.selectedIndex).toBe(-1);
+
+      // Re-selecting should update selectedIndex
+      track.selected = true;
+      expect(track.selected).toBe(true);
+      expect(decoder.tracks.selectedIndex).toBe(0);
+
+      decoder.close();
+    });
   });
 });

@@ -28,6 +28,36 @@ import { acquireBuffer, releaseBuffer } from '../utils/buffer-pool.js';
 
 export type CodecState = 'unconfigured' | 'configured' | 'closed';
 
+/**
+ * Opus-specific encoder configuration
+ * https://www.w3.org/TR/webcodecs-opus-codec-registration/
+ */
+export interface OpusEncoderConfig {
+  /** Frame duration in microseconds (2500, 5000, 10000, 20000, 40000, 60000, 80000, 100000, 120000) */
+  frameDuration?: number;
+  /** Opus application mode */
+  application?: 'voip' | 'audio' | 'lowdelay';
+  /** Packet loss percentage for forward error correction (0-100) */
+  packetLossPerc?: number;
+  /** Use in-band forward error correction */
+  useinbandfec?: boolean;
+  /** Use discontinuous transmission mode (for silence suppression) */
+  usedtx?: boolean;
+  /** Signal type hint for encoder optimization */
+  signal?: 'auto' | 'music' | 'voice';
+  /** Complexity (0-10, higher = better quality but more CPU) */
+  complexity?: number;
+}
+
+/**
+ * AAC-specific encoder configuration
+ * https://www.w3.org/TR/webcodecs-aac-codec-registration/
+ */
+export interface AacEncoderConfig {
+  /** Output format: 'aac' for raw AAC, 'adts' for ADTS-framed */
+  format?: 'aac' | 'adts';
+}
+
 export interface AudioEncoderConfig {
   codec: string;
   sampleRate: number;
@@ -35,7 +65,15 @@ export interface AudioEncoderConfig {
   bitrate?: number;
   bitrateMode?: 'constant' | 'variable';
   latencyMode?: 'quality' | 'realtime';
+  /**
+   * @deprecated Use codec-specific config (aac.format) instead.
+   * Top-level format for backwards compatibility.
+   */
   format?: 'adts' | 'aac';
+  /** Opus-specific configuration */
+  opus?: OpusEncoderConfig;
+  /** AAC-specific configuration */
+  aac?: AacEncoderConfig;
 }
 
 export interface AudioEncoderInit {
@@ -138,10 +176,25 @@ export class AudioEncoder extends WebCodecsEventTarget {
       return { supported: false, config };
     }
 
+    // Clone the config per WebCodecs spec
+    const clonedConfig: AudioEncoderConfig = {
+      codec: config.codec,
+      sampleRate: config.sampleRate,
+      numberOfChannels: config.numberOfChannels,
+    };
+
+    // Copy optional properties if present
+    if (config.bitrate !== undefined) clonedConfig.bitrate = config.bitrate;
+    if (config.bitrateMode !== undefined) clonedConfig.bitrateMode = config.bitrateMode;
+    if (config.latencyMode !== undefined) clonedConfig.latencyMode = config.latencyMode;
+    if (config.format !== undefined) clonedConfig.format = config.format;
+    if (config.opus !== undefined) clonedConfig.opus = { ...config.opus };
+    if (config.aac !== undefined) clonedConfig.aac = { ...config.aac };
+
     const codecBase = getCodecBase(config.codec);
     const supported = codecBase in AUDIO_ENCODER_CODEC_MAP || config.codec in AUDIO_ENCODER_CODEC_MAP;
 
-    return { supported, config };
+    return { supported, config: clonedConfig };
   }
 
   configure(config: AudioEncoderConfig): void {
@@ -178,14 +231,22 @@ export class AudioEncoder extends WebCodecsEventTarget {
     this._state = 'configured';
     this._frameCount = 0;
     this._firstChunk = true;
-    this._bitstreamFormat = config.format ?? 'adts';
     this._codecDescription = null;
 
     // Opus always encodes at 48kHz regardless of input sample rate
     // Cache codec base for hot path in _onEncoderFrame
     this._codecBase = getCodecBase(config.codec);
     const isOpus = this._codecBase === 'opus';
+    const isAac = this._codecBase === 'mp4a' || this._codecBase === 'aac';
     this._encoderSampleRate = isOpus ? OPUS_ENCODER_SAMPLE_RATE : config.sampleRate;
+
+    // Resolve bitstream format from codec-specific config or top-level config
+    // Codec-specific configs take precedence (per WebCodecs spec)
+    if (isAac && config.aac?.format) {
+      this._bitstreamFormat = config.aac.format;
+    } else {
+      this._bitstreamFormat = config.format ?? 'adts';
+    }
 
     this._startEncoder();
   }

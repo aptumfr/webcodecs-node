@@ -24,6 +24,33 @@ const DEFAULT_FRAMERATE = 30;
 
 export type CodecState = 'unconfigured' | 'configured' | 'closed';
 
+/**
+ * AVC/H.264-specific encoder configuration
+ * https://www.w3.org/TR/webcodecs-avc-codec-registration/
+ */
+export interface AvcEncoderConfig {
+  /** Output format: 'avc' for AVCC (length-prefixed), 'annexb' for Annex B (start codes) */
+  format?: 'avc' | 'annexb';
+}
+
+/**
+ * HEVC/H.265-specific encoder configuration
+ * https://www.w3.org/TR/webcodecs-hevc-codec-registration/
+ */
+export interface HevcEncoderConfig {
+  /** Output format: 'hevc' for HVCC (length-prefixed), 'annexb' for Annex B (start codes) */
+  format?: 'hevc' | 'annexb';
+}
+
+/**
+ * AV1-specific encoder configuration
+ * https://www.w3.org/TR/webcodecs-av1-codec-registration/
+ */
+export interface Av1EncoderConfig {
+  /** Whether to force all frames to be keyframes (for screen sharing use cases) */
+  forceScreenContentTools?: boolean;
+}
+
 export interface VideoEncoderConfig {
   codec: string;
   width: number;
@@ -37,7 +64,17 @@ export interface VideoEncoderConfig {
   scalabilityMode?: string;
   bitrateMode?: 'constant' | 'variable' | 'quantizer';
   latencyMode?: 'quality' | 'realtime';
+  /**
+   * @deprecated Use codec-specific config (avc.format, hevc.format) instead.
+   * Top-level format for backwards compatibility.
+   */
   format?: 'annexb' | 'mp4';
+  /** AVC/H.264-specific configuration */
+  avc?: AvcEncoderConfig;
+  /** HEVC/H.265-specific configuration */
+  hevc?: HevcEncoderConfig;
+  /** AV1-specific configuration */
+  av1?: Av1EncoderConfig;
   /**
    * Color space for HDR encoding. When provided with primaries, transfer, matrix,
    * and HDR metadata (SMPTE ST 2086 / Content Light Level), the encoder will
@@ -68,6 +105,7 @@ export interface VideoEncoderOutputMetadata {
     codedHeight?: number;
     displayAspectWidth?: number;
     displayAspectHeight?: number;
+    colorSpace?: VideoColorSpaceInit;
   };
 }
 
@@ -177,20 +215,44 @@ export class VideoEncoder extends WebCodecsEventTarget {
     // Validate config - throws TypeError for invalid configs per spec
     validateVideoEncoderConfig(config);
 
+    // Clone the config per WebCodecs spec
+    const clonedConfig: VideoEncoderConfig = {
+      codec: config.codec,
+      width: config.width,
+      height: config.height,
+    };
+
+    // Copy optional properties if present
+    if (config.displayWidth !== undefined) clonedConfig.displayWidth = config.displayWidth;
+    if (config.displayHeight !== undefined) clonedConfig.displayHeight = config.displayHeight;
+    if (config.bitrate !== undefined) clonedConfig.bitrate = config.bitrate;
+    if (config.framerate !== undefined) clonedConfig.framerate = config.framerate;
+    if (config.hardwareAcceleration !== undefined) clonedConfig.hardwareAcceleration = config.hardwareAcceleration;
+    if (config.alpha !== undefined) clonedConfig.alpha = config.alpha;
+    if (config.scalabilityMode !== undefined) clonedConfig.scalabilityMode = config.scalabilityMode;
+    if (config.bitrateMode !== undefined) clonedConfig.bitrateMode = config.bitrateMode;
+    if (config.latencyMode !== undefined) clonedConfig.latencyMode = config.latencyMode;
+    if (config.format !== undefined) clonedConfig.format = config.format;
+    if (config.avc !== undefined) clonedConfig.avc = { ...config.avc };
+    if (config.hevc !== undefined) clonedConfig.hevc = { ...config.hevc };
+    if (config.av1 !== undefined) clonedConfig.av1 = { ...config.av1 };
+    if (config.colorSpace !== undefined) clonedConfig.colorSpace = { ...config.colorSpace };
+    if (config.maxQueueSize !== undefined) clonedConfig.maxQueueSize = config.maxQueueSize;
+
     // Check for odd dimensions (required for YUV420)
     if (config.width % 2 !== 0 || config.height % 2 !== 0) {
-      return { supported: false, config };
+      return { supported: false, config: clonedConfig };
     }
 
     // Check for unreasonably large dimensions
     if (config.width > 16384 || config.height > 16384) {
-      return { supported: false, config };
+      return { supported: false, config: clonedConfig };
     }
 
     // Validate codec string format and check if supported
     const codecValidation = validateVideoCodec(config.codec);
     if (!codecValidation.supported) {
-      return { supported: false, config };
+      return { supported: false, config: clonedConfig };
     }
 
     // Get normalized codec name for capability checks
@@ -202,7 +264,7 @@ export class VideoEncoder extends WebCodecsEventTarget {
       const supportsAlpha = parsed.name === 'vp9' &&
         config.hardwareAcceleration !== 'prefer-hardware';
       if (!supportsAlpha) {
-        return { supported: false, config };
+        return { supported: false, config: clonedConfig };
       }
     }
 
@@ -213,11 +275,11 @@ export class VideoEncoder extends WebCodecsEventTarget {
       const supportsQuantizer = parsed.name === 'h264' || parsed.name === 'hevc' ||
         parsed.name === 'vp9' || parsed.name === 'av1';
       if (!supportsQuantizer) {
-        return { supported: false, config };
+        return { supported: false, config: clonedConfig };
       }
     }
 
-    return { supported: true, config };
+    return { supported: true, config: clonedConfig };
   }
 
   configure(config: VideoEncoderConfig): void {
@@ -485,6 +547,21 @@ export class VideoEncoder extends WebCodecsEventTarget {
     const pixFormat = inputFormat || 'yuv420p';
     this._encoder = new NodeAvVideoEncoder();
 
+    // Resolve output format from codec-specific config or top-level config
+    // Codec-specific configs take precedence (per WebCodecs spec)
+    const codecBase = getCodecBase(this._config.codec);
+    let outputFormat: 'annexb' | 'mp4' | undefined = this._config.format;
+
+    if (codecBase === 'avc1' || codecBase === 'avc3') {
+      const avcFormat = this._config.avc?.format;
+      if (avcFormat === 'avc') outputFormat = 'mp4';
+      else if (avcFormat === 'annexb') outputFormat = 'annexb';
+    } else if (codecBase === 'hvc1' || codecBase === 'hev1') {
+      const hevcFormat = this._config.hevc?.format;
+      if (hevcFormat === 'hevc') outputFormat = 'mp4';
+      else if (hevcFormat === 'annexb') outputFormat = 'annexb';
+    }
+
     this._encoder.startEncoder({
       codec: this._config.codec,
       width: this._config.width,
@@ -496,7 +573,7 @@ export class VideoEncoder extends WebCodecsEventTarget {
       latencyMode: this._config.latencyMode,
       alpha: this._config.alpha,
       hardwareAcceleration: this._hardwarePreference,
-      format: this._config.format,
+      format: outputFormat,
       colorSpace: this._config.colorSpace,
     });
 
@@ -561,6 +638,8 @@ export class VideoEncoder extends WebCodecsEventTarget {
             // Include display dimensions if specified (for aspect ratio metadata)
             displayAspectWidth: this._config.displayWidth ?? this._config.width,
             displayAspectHeight: this._config.displayHeight ?? this._config.height,
+            // Include colorSpace for HDR content
+            colorSpace: this._config.colorSpace,
           },
         }
       : undefined;
