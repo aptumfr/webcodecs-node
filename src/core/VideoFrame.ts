@@ -35,14 +35,12 @@ export type { VideoPixelFormat, VideoFrameBufferInit, VideoFrameCopyToOptions, V
 /**
  * VideoFrameMetadata interface per W3C WebCodecs spec
  * https://w3c.github.io/webcodecs/video_frame_metadata_registry.html
- *
- * Note: This is a stub implementation. The full metadata registry includes:
- * - rtpTimestamp: For WebRTC media synchronization
- * - rotation: Frame orientation (0, 90, 180, 270)
- * - flip: Whether to flip the frame
  */
 export interface VideoFrameMetadata {
-  // Currently returns empty object - metadata fields will be added as needed
+  /** Frame rotation in degrees (0, 90, 180, 270) */
+  rotation?: 0 | 90 | 180 | 270;
+  /** Whether to flip the frame horizontally */
+  flip?: boolean;
 }
 
 // Import type guards from utils
@@ -75,6 +73,8 @@ export class VideoFrame {
   private _timestamp: number;
   private _colorSpace: VideoColorSpace;
   private _inputLayout: PlaneLayout[] | null = null; // Layout from init, if provided
+  private _rotation: 0 | 90 | 180 | 270 = 0;
+  private _flip: boolean = false;
 
   get format(): VideoPixelFormat | null { return this._closed ? null : this._format; }
   get codedWidth(): number { return this._closed ? 0 : this._codedWidth; }
@@ -156,6 +156,10 @@ export class VideoFrame {
       this._colorSpace = new VideoColorSpace(
         this._getDefaultColorSpace(this._format, frameInit.colorSpace)
       );
+      // Store rotation and flip from init or inherit from source frame metadata
+      const sourceMetadata = (sourceFrame as any).metadata?.() ?? {};
+      this._rotation = frameInit.rotation ?? sourceMetadata.rotation ?? 0;
+      this._flip = frameInit.flip ?? sourceMetadata.flip ?? false;
       return;
     }
 
@@ -209,6 +213,8 @@ export class VideoFrame {
       this._colorSpace = new VideoColorSpace(
         this._getDefaultColorSpace(bufferInit.format, bufferInit.colorSpace)
       );
+      this._rotation = bufferInit.rotation ?? 0;
+      this._flip = bufferInit.flip ?? false;
     } else if (dataOrImage instanceof ArrayBuffer || ArrayBuffer.isView(dataOrImage)) {
       const data = dataOrImage as BufferSource;
       const bufferInit = init as VideoFrameBufferInit;
@@ -269,6 +275,8 @@ export class VideoFrame {
       );
       // Store input layout if provided (for non-standard memory layouts)
       this._inputLayout = bufferInit.layout ?? null;
+      this._rotation = bufferInit.rotation ?? 0;
+      this._flip = bufferInit.flip ?? false;
     } else if (isCanvasImageSource(dataOrImage)) {
       const frameInit = init as VideoFrameInit;
 
@@ -304,6 +312,8 @@ export class VideoFrame {
       this._colorSpace = new VideoColorSpace(
         this._getDefaultColorSpace(result.format, frameInit.colorSpace)
       );
+      this._rotation = frameInit.rotation ?? 0;
+      this._flip = frameInit.flip ?? false;
     } else {
       throw new TypeError('data must be an ArrayBuffer, ArrayBufferView, or CanvasImageSource');
     }
@@ -464,13 +474,17 @@ export class VideoFrame {
   /**
    * Returns metadata associated with this VideoFrame.
    * Per W3C WebCodecs spec: https://w3c.github.io/webcodecs/video_frame_metadata_registry.html
-   *
-   * Note: Currently returns an empty object. Metadata fields like rtpTimestamp,
-   * rotation, and flip will be added as use cases require them.
    */
   metadata(): VideoFrameMetadata {
     this._checkNotClosed();
-    return {};
+    const result: VideoFrameMetadata = {};
+    if (this._rotation !== 0) {
+      result.rotation = this._rotation;
+    }
+    if (this._flip) {
+      result.flip = this._flip;
+    }
+    return result;
   }
 
   /**

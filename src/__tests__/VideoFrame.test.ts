@@ -292,3 +292,153 @@ describe('DOMRectReadOnly', () => {
     expect(rect.bottom).toBe(220);
   });
 });
+
+describe('VideoFrame metadata (rotation/flip)', () => {
+  it('should return empty metadata by default', () => {
+    const data = new Uint8Array(16 * 4);
+    const frame = new VideoFrame(data, {
+      format: 'RGBA',
+      codedWidth: 4,
+      codedHeight: 4,
+      timestamp: 0,
+    });
+
+    const metadata = frame.metadata();
+    expect(metadata).toEqual({});
+    frame.close();
+  });
+
+  it('should store and return rotation in metadata', () => {
+    const data = new Uint8Array(16 * 4);
+    const frame = new VideoFrame(data, {
+      format: 'RGBA',
+      codedWidth: 4,
+      codedHeight: 4,
+      timestamp: 0,
+      rotation: 90,
+    });
+
+    const metadata = frame.metadata();
+    expect(metadata.rotation).toBe(90);
+    frame.close();
+  });
+
+  it('should store and return flip in metadata', () => {
+    const data = new Uint8Array(16 * 4);
+    const frame = new VideoFrame(data, {
+      format: 'RGBA',
+      codedWidth: 4,
+      codedHeight: 4,
+      timestamp: 0,
+      flip: true,
+    });
+
+    const metadata = frame.metadata();
+    expect(metadata.flip).toBe(true);
+    frame.close();
+  });
+
+  it('should store both rotation and flip', () => {
+    const data = new Uint8Array(16 * 4);
+    const frame = new VideoFrame(data, {
+      format: 'RGBA',
+      codedWidth: 4,
+      codedHeight: 4,
+      timestamp: 0,
+      rotation: 180,
+      flip: true,
+    });
+
+    const metadata = frame.metadata();
+    expect(metadata.rotation).toBe(180);
+    expect(metadata.flip).toBe(true);
+    frame.close();
+  });
+
+  it('should not include rotation:0 in metadata', () => {
+    const data = new Uint8Array(16 * 4);
+    const frame = new VideoFrame(data, {
+      format: 'RGBA',
+      codedWidth: 4,
+      codedHeight: 4,
+      timestamp: 0,
+      rotation: 0,
+    });
+
+    const metadata = frame.metadata();
+    expect(metadata.rotation).toBeUndefined();
+    frame.close();
+  });
+
+  it('should not include flip:false in metadata', () => {
+    const data = new Uint8Array(16 * 4);
+    const frame = new VideoFrame(data, {
+      format: 'RGBA',
+      codedWidth: 4,
+      codedHeight: 4,
+      timestamp: 0,
+      flip: false,
+    });
+
+    const metadata = frame.metadata();
+    expect(metadata.flip).toBeUndefined();
+    frame.close();
+  });
+
+  it('should support all valid rotation values', () => {
+    const rotations = [0, 90, 180, 270] as const;
+    for (const rotation of rotations) {
+      const data = new Uint8Array(16 * 4);
+      const frame = new VideoFrame(data, {
+        format: 'RGBA',
+        codedWidth: 4,
+        codedHeight: 4,
+        timestamp: 0,
+        rotation,
+      });
+
+      const metadata = frame.metadata();
+      if (rotation === 0) {
+        expect(metadata.rotation).toBeUndefined();
+      } else {
+        expect(metadata.rotation).toBe(rotation);
+      }
+      frame.close();
+    }
+  });
+
+  it('should inherit rotation/flip when constructing from another VideoFrame', () => {
+    const data = new Uint8Array(16 * 4);
+    const sourceFrame = new VideoFrame(data, {
+      format: 'RGBA',
+      codedWidth: 4,
+      codedHeight: 4,
+      timestamp: 0,
+      rotation: 270,
+      flip: true,
+    });
+
+    const copiedFrame = new VideoFrame(sourceFrame, { timestamp: 1000 });
+
+    const metadata = copiedFrame.metadata();
+    expect(metadata.rotation).toBe(270);
+    expect(metadata.flip).toBe(true);
+
+    sourceFrame.close();
+    copiedFrame.close();
+  });
+
+  it('should throw when calling metadata() on closed frame', () => {
+    const data = new Uint8Array(16 * 4);
+    const frame = new VideoFrame(data, {
+      format: 'RGBA',
+      codedWidth: 4,
+      codedHeight: 4,
+      timestamp: 0,
+      rotation: 90,
+    });
+
+    frame.close();
+    expect(() => frame.metadata()).toThrow();
+  });
+});

@@ -774,4 +774,107 @@ describe('VideoEncoder', () => {
       }
     }, 60000);
   });
+
+  describe('decoderConfig.colorSpace defaults', () => {
+    it('should provide default BT.709 colorSpace in decoderConfig', async () => {
+      const chunks: EncodedVideoChunk[] = [];
+      let receivedMetadata: any = null;
+
+      const encoder = new VideoEncoder({
+        output: (chunk, metadata) => {
+          chunks.push(chunk);
+          if (metadata?.decoderConfig) {
+            receivedMetadata = metadata;
+          }
+        },
+        error: (e) => { throw e; },
+      });
+
+      encoder.configure({
+        codec: 'avc1.42001E',
+        width: 64,
+        height: 64,
+        // Note: no colorSpace specified
+      });
+
+      const frame = new VideoFrame(new Uint8Array(64 * 64 * 4), {
+        format: 'RGBA',
+        codedWidth: 64,
+        codedHeight: 64,
+        timestamp: 0,
+      });
+
+      encoder.encode(frame, { keyFrame: true });
+      frame.close();
+
+      await encoder.flush();
+      encoder.close();
+
+      // Should have received metadata with colorSpace
+      expect(receivedMetadata).not.toBeNull();
+      expect(receivedMetadata.decoderConfig.colorSpace).toBeDefined();
+      expect(receivedMetadata.decoderConfig.colorSpace.primaries).toBe('bt709');
+      expect(receivedMetadata.decoderConfig.colorSpace.transfer).toBe('bt709');
+      expect(receivedMetadata.decoderConfig.colorSpace.matrix).toBe('bt709');
+    }, 30000);
+
+    it('should use user-provided colorSpace in decoderConfig', async () => {
+      let receivedMetadata: any = null;
+
+      const encoder = new VideoEncoder({
+        output: (_chunk, metadata) => {
+          if (metadata?.decoderConfig) {
+            receivedMetadata = metadata;
+          }
+        },
+        error: (e) => { throw e; },
+      });
+
+      encoder.configure({
+        codec: 'avc1.42001E',
+        width: 64,
+        height: 64,
+        colorSpace: {
+          primaries: 'bt2020',
+          transfer: 'pq',
+          matrix: 'bt2020-ncl',
+        },
+      });
+
+      const frame = new VideoFrame(new Uint8Array(64 * 64 * 4), {
+        format: 'RGBA',
+        codedWidth: 64,
+        codedHeight: 64,
+        timestamp: 0,
+      });
+
+      encoder.encode(frame, { keyFrame: true });
+      frame.close();
+
+      await encoder.flush();
+      encoder.close();
+
+      expect(receivedMetadata).not.toBeNull();
+      expect(receivedMetadata.decoderConfig.colorSpace.primaries).toBe('bt2020');
+      expect(receivedMetadata.decoderConfig.colorSpace.transfer).toBe('pq');
+      expect(receivedMetadata.decoderConfig.colorSpace.matrix).toBe('bt2020-ncl');
+    }, 30000);
+  });
+
+  describe('AV1 codec-specific config', () => {
+    it('should accept av1 config with forceScreenContentTools', async () => {
+      const support = await VideoEncoder.isConfigSupported({
+        codec: 'av01.0.04M.08',
+        width: 640,
+        height: 480,
+        av1: {
+          forceScreenContentTools: true,
+        },
+      });
+
+      // Config should be valid (actual encoding may vary by system)
+      expect(support.config).toBeDefined();
+      expect(support.config.av1?.forceScreenContentTools).toBe(true);
+    });
+  });
 });

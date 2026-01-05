@@ -822,5 +822,151 @@ describe('ImageDecoder', () => {
 
       decoder.close();
     });
+
+    it('should support bracket notation for track access (tracks[0])', async () => {
+      const pngPath = findTestImage('test.png');
+      if (!pngPath) {
+        console.log('Skipping test: test.png not found');
+        return;
+      }
+
+      const data = fs.readFileSync(pngPath);
+      const decoder = new ImageDecoder({
+        data: bufferToArrayBuffer(data),
+        type: 'image/png',
+      });
+
+      await decoder.completed;
+
+      // Test bracket notation access - should work via Proxy
+      const trackViaBracket = decoder.tracks[0];
+      const trackViaSelectedTrack = decoder.tracks.selectedTrack;
+
+      expect(trackViaBracket).toBeDefined();
+      expect(trackViaBracket).toBe(trackViaSelectedTrack);
+
+      // Verify track properties are accessible
+      expect(trackViaBracket!.frameCount).toBe(1);
+      expect(trackViaBracket!.animated).toBe(false);
+      expect(trackViaBracket!.selected).toBe(true);
+
+      decoder.close();
+    });
+
+    it('should return undefined for out-of-bounds bracket notation', async () => {
+      const pngPath = findTestImage('test.png');
+      if (!pngPath) {
+        console.log('Skipping test: test.png not found');
+        return;
+      }
+
+      const data = fs.readFileSync(pngPath);
+      const decoder = new ImageDecoder({
+        data: bufferToArrayBuffer(data),
+        type: 'image/png',
+      });
+
+      await decoder.completed;
+
+      // Out of bounds should return undefined
+      expect(decoder.tracks[999]).toBeUndefined();
+      expect(decoder.tracks[-1]).toBeUndefined();
+
+      decoder.close();
+    });
+
+    it('should throw InvalidStateError when decoding with no track selected', async () => {
+      const pngPath = findTestImage('test.png');
+      if (!pngPath) {
+        console.log('Skipping test: test.png not found');
+        return;
+      }
+
+      const data = fs.readFileSync(pngPath);
+      const decoder = new ImageDecoder({
+        data: bufferToArrayBuffer(data),
+        type: 'image/png',
+      });
+
+      await decoder.completed;
+
+      // Deselect all tracks
+      const track = decoder.tracks.selectedTrack!;
+      track.selected = false;
+      expect(decoder.tracks.selectedIndex).toBe(-1);
+
+      // decode() should throw when no track is selected
+      await expect(decoder.decode({ frameIndex: 0 })).rejects.toThrow('No track selected');
+
+      decoder.close();
+    });
+
+    it('should have repetitionCount of 0 for still images (PNG)', async () => {
+      const pngPath = findTestImage('test.png');
+      if (!pngPath) {
+        console.log('Skipping test: test.png not found');
+        return;
+      }
+
+      const data = fs.readFileSync(pngPath);
+      const decoder = new ImageDecoder({
+        data: bufferToArrayBuffer(data),
+        type: 'image/png',
+      });
+
+      await decoder.completed;
+
+      const track = decoder.tracks.selectedTrack!;
+      // Per W3C spec: "For still images, 0"
+      expect(track.repetitionCount).toBe(0);
+
+      decoder.close();
+    });
+
+    it('should have repetitionCount of 0 for still images (JPEG)', async () => {
+      const jpgPath = findTestImage('test.jpg');
+      if (!jpgPath) {
+        console.log('Skipping test: test.jpg not found');
+        return;
+      }
+
+      const data = fs.readFileSync(jpgPath);
+      const decoder = new ImageDecoder({
+        data: bufferToArrayBuffer(data),
+        type: 'image/jpeg',
+      });
+
+      await decoder.completed;
+
+      const track = decoder.tracks.selectedTrack!;
+      // Per W3C spec: "For still images, 0"
+      expect(track.repetitionCount).toBe(0);
+
+      decoder.close();
+    });
+
+    it('should have repetitionCount of Infinity for looping animated GIF', async () => {
+      const gifPath = findTestImage('animated_multi.gif');
+      if (!gifPath) {
+        console.log('Skipping test: animated_multi.gif not found');
+        return;
+      }
+
+      const data = fs.readFileSync(gifPath);
+      const decoder = new ImageDecoder({
+        data: bufferToArrayBuffer(data),
+        type: 'image/gif',
+      });
+
+      await decoder.completed;
+
+      const track = decoder.tracks.selectedTrack!;
+      // For animated GIF with loop=0 (infinite loop), repetitionCount should be Infinity
+      if (track.animated) {
+        expect(track.repetitionCount).toBe(Infinity);
+      }
+
+      decoder.close();
+    });
   });
 });

@@ -562,6 +562,11 @@ export class VideoEncoder extends WebCodecsEventTarget {
       else if (hevcFormat === 'annexb') outputFormat = 'annexb';
     }
 
+    // Build AV1-specific config if applicable
+    const av1Config = (codecBase === 'av01' && this._config.av1)
+      ? { forceScreenContentTools: this._config.av1.forceScreenContentTools }
+      : undefined;
+
     this._encoder.startEncoder({
       codec: this._config.codec,
       width: this._config.width,
@@ -575,6 +580,7 @@ export class VideoEncoder extends WebCodecsEventTarget {
       hardwareAcceleration: this._hardwarePreference,
       format: outputFormat,
       colorSpace: this._config.colorSpace,
+      av1: av1Config,
     });
 
     this._encoder.on('encodedFrame', (frame: { data: Buffer; timestamp: number; keyFrame: boolean }) => {
@@ -628,6 +634,13 @@ export class VideoEncoder extends WebCodecsEventTarget {
     });
 
     // Include decoder config with description on first chunk
+    // Per WebCodecs spec, colorSpace should always be non-null with defaults
+    const defaultColorSpace: VideoColorSpaceInit = {
+      primaries: 'bt709',
+      transfer: 'bt709',
+      matrix: 'bt709',
+      fullRange: false,
+    };
     const metadata: VideoEncoderOutputMetadata | undefined = this._firstChunk
       ? {
           decoderConfig: {
@@ -638,8 +651,8 @@ export class VideoEncoder extends WebCodecsEventTarget {
             // Include display dimensions if specified (for aspect ratio metadata)
             displayAspectWidth: this._config.displayWidth ?? this._config.width,
             displayAspectHeight: this._config.displayHeight ?? this._config.height,
-            // Include colorSpace for HDR content
-            colorSpace: this._config.colorSpace,
+            // Include colorSpace - use user-provided or default to BT.709
+            colorSpace: this._config.colorSpace ?? defaultColorSpace,
           },
         }
       : undefined;

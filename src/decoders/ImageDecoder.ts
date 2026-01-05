@@ -94,8 +94,9 @@ export class ImageTrack {
 
 /**
  * ImageTrackList - A list of image tracks
+ * Uses a Proxy to support bracket notation (tracks[0]) at runtime
  */
-export class ImageTrackList {
+class ImageTrackListImpl {
   private _tracks: ImageTrack[] = [];
   private _selectedIndex: number = -1;
   private _ready: Promise<void>;
@@ -122,7 +123,7 @@ export class ImageTrackList {
   _addTrack(track: ImageTrack): void {
     const index = this._tracks.length;
     this._tracks.push(track);
-    track._setTrackList(this, index);
+    track._setTrackList(this as unknown as ImageTrackList, index);
     if (track.selected && this._selectedIndex === -1) {
       this._selectedIndex = index;
     }
@@ -147,7 +148,6 @@ export class ImageTrackList {
 
   /**
    * Get track by index
-   * Per WebCodecs spec, this enables tracks[0] style access
    */
   get(index: number): ImageTrack | undefined {
     return this._tracks[index];
@@ -156,13 +156,45 @@ export class ImageTrackList {
   [Symbol.iterator](): Iterator<ImageTrack> {
     return this._tracks[Symbol.iterator]();
   }
+}
 
-  /**
-   * Allow numeric index access (readonly)
-   * Note: For full bracket notation support, use .get(index)
-   */
+/**
+ * ImageTrackList interface with numeric indexing support
+ */
+export interface ImageTrackList extends ImageTrackListImpl {
   [index: number]: ImageTrack | undefined;
 }
+
+/**
+ * Create an ImageTrackList with Proxy for bracket notation support
+ * Per WebCodecs spec, tracks[0] should work at runtime
+ */
+export function createImageTrackList(): ImageTrackList {
+  const impl = new ImageTrackListImpl();
+  return new Proxy(impl, {
+    get(target, prop, receiver) {
+      // Handle numeric string properties (e.g., "0", "1")
+      if (typeof prop === 'string' && /^\d+$/.test(prop)) {
+        return target.get(parseInt(prop, 10));
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+    has(target, prop) {
+      if (typeof prop === 'string' && /^\d+$/.test(prop)) {
+        const index = parseInt(prop, 10);
+        return index >= 0 && index < target.length;
+      }
+      return Reflect.has(target, prop);
+    },
+  }) as ImageTrackList;
+}
+
+// For backwards compatibility, also export a class that creates the proxy
+export const ImageTrackList = class {
+  constructor() {
+    return createImageTrackList();
+  }
+} as unknown as { new(): ImageTrackList };
 
 // Supported image types (delegated to node-av)
 const ANIMATED_FORMATS = ['image/gif', 'image/apng', 'image/webp'];
@@ -202,7 +234,7 @@ export class ImageDecoder {
     colorSpace?: VideoColorSpaceInit;
   }> = [];
   private _framesParsed: boolean = false;
-  private _repetitionCount: number = 0;
+  private _repetitionCount: number | undefined = undefined;
 
   constructor(init: ImageDecoderInit) {
     if (!init || typeof init !== 'object') {
@@ -258,21 +290,37 @@ export class ImageDecoder {
     }
   }
 
+  /**
+   * Read data from a ReadableStream
+   *
+   * Note: Current implementation buffers the entire stream before decoding.
+   * This is a limitation of the node-av backend which requires complete data
+   * for image decoding. True progressive/streaming decode would require:
+   * 1. Format-specific header parsing to determine image dimensions
+   * 2. Progressive frame decoding as data arrives
+   * 3. Updating track.frameCount as new frames are discovered
+   *
+   * For animated GIF streaming tests (WPT), this means frames won't be
+   * available until the entire stream is received.
+   */
   private async _readStream(stream: ReadableStream<ArrayBufferView>): Promise<void> {
     const reader = stream.getReader();
     const chunks: Uint8Array[] = [];
+    let totalReceived = 0;
 
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         if (value) {
-          chunks.push(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+          const chunk = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+          chunks.push(chunk);
+          totalReceived += chunk.length;
         }
       }
 
-      const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-      this._data = new Uint8Array(totalLength);
+      // Concatenate all chunks
+      this._data = new Uint8Array(totalReceived);
       let offset = 0;
       for (const chunk of chunks) {
         this._data.set(chunk, offset);
@@ -304,9 +352,10 @@ export class ImageDecoder {
       throw new DOMException(`Unsupported image type: ${this._type}`, 'NotSupportedError');
     }
 
-    // Set default repetition count (GIF loops forever by default)
+    // Set default repetition count based on format
+    // GIF loops forever by default, other animated formats may vary
     const type = this._type.toLowerCase();
-    this._repetitionCount = type === 'image/gif' ? Infinity : 1;
+    this._repetitionCount = type === 'image/gif' ? Infinity : undefined;
 
     await this._decodeAllFramesDirect();
 
@@ -383,10 +432,21 @@ export class ImageDecoder {
     const totalFrames = this._frames.length;
     this._visibleFrameCount = totalFrames;
     this._visibleAnimated = totalFrames > 1;
-    // Per WebCodecs spec: repetitionCount of 0 means loop infinitely
-    // Only use 1 (single play) as default if _repetitionCount is undefined/null
-    this._visibleRepetitionCount = this._repetitionCount === 0 ? Infinity :
-      (this._repetitionCount ?? 1);
+
+    // Per WebCodecs spec:
+    // - Still images (single frame): repetitionCount = 0
+    // - Animated images: repetitionCount = number of loops, Infinity = loop forever
+    // File format convention: 0 in file = loop forever, converted to Infinity
+    if (!this._visibleAnimated) {
+      // Still image: repetitionCount is 0 per spec
+      this._visibleRepetitionCount = 0;
+    } else if (this._repetitionCount === 0) {
+      // File says 0 = loop forever
+      this._visibleRepetitionCount = Infinity;
+    } else {
+      // Use file value, or Infinity as default for animated
+      this._visibleRepetitionCount = this._repetitionCount ?? Infinity;
+    }
   }
 
   private _parseExifOrientation(data: Uint8Array): number | null {
@@ -698,6 +758,11 @@ export class ImageDecoder {
 
     await this._completed;
 
+    // Per WebCodecs spec, decode() requires a selected track
+    if (this._tracks.selectedTrack === null) {
+      throw new DOMException('No track selected', 'InvalidStateError');
+    }
+
     const frameIndex = options?.frameIndex ?? 0;
     const availableFrames = this._frames.length;
 
@@ -743,10 +808,10 @@ export class ImageDecoder {
 
     this._frames = [];
     this._framesParsed = false;
-    this._repetitionCount = 0;
+    this._repetitionCount = undefined;
     this._visibleFrameCount = 0;
     this._visibleAnimated = false;
-    this._visibleRepetitionCount = 1;
+    this._visibleRepetitionCount = 0;
     this._tracks = new ImageTrackList();
     this._complete = false;
     this._completed = new Promise((resolve, reject) => {

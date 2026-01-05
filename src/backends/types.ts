@@ -32,6 +32,14 @@ export interface DecodedFrame {
 }
 
 /**
+ * AV1-specific backend encoder options
+ */
+export interface Av1BackendConfig {
+  /** Force all frames to use screen content tools (for screen sharing) */
+  forceScreenContentTools?: boolean;
+}
+
+/**
  * Video encoder configuration
  */
 export interface VideoEncoderBackendConfig {
@@ -49,6 +57,8 @@ export interface VideoEncoderBackendConfig {
   format?: 'annexb' | 'mp4';
   /** Color space for HDR encoding with optional HDR metadata */
   colorSpace?: VideoColorSpaceInit;
+  /** AV1-specific options */
+  av1?: Av1BackendConfig;
 }
 
 /**
@@ -65,6 +75,26 @@ export interface VideoDecoderBackendConfig {
 }
 
 /**
+ * Opus-specific backend encoder options
+ */
+export interface OpusBackendConfig {
+  frameDuration?: number;
+  application?: 'voip' | 'audio' | 'lowdelay';
+  packetlossperc?: number;
+  useinbandfec?: boolean;
+  usedtx?: boolean;
+  signal?: 'auto' | 'music' | 'voice';
+  complexity?: number;
+}
+
+/**
+ * AAC-specific backend encoder options
+ */
+export interface AacBackendConfig {
+  format?: 'aac' | 'adts';
+}
+
+/**
  * Audio encoder configuration
  */
 export interface AudioEncoderBackendConfig {
@@ -74,6 +104,10 @@ export interface AudioEncoderBackendConfig {
   bitrate?: number;
   bitrateMode?: 'constant' | 'variable';
   latencyMode?: 'quality' | 'realtime';
+  /** Opus-specific options */
+  opus?: OpusBackendConfig;
+  /** AAC-specific options */
+  aac?: AacBackendConfig;
 }
 
 /**

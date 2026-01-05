@@ -389,8 +389,14 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
 
     // Codec-specific options
     if (isOpus) {
-      options.application = isRealtime ? 'voip' : 'audio';
-      if (isRealtime) {
+      const opusConfig = this.config.opus;
+      // Application mode: use config or default based on latency mode
+      options.application = opusConfig?.application ?? (isRealtime ? 'voip' : 'audio');
+      // Frame duration: use config or default for realtime
+      if (opusConfig?.frameDuration !== undefined) {
+        // Convert microseconds to milliseconds for libopus
+        options.frame_duration = String(opusConfig.frameDuration / 1000);
+      } else if (isRealtime) {
         options.frame_duration = '10';
       }
       // Opus VBR control: 'on' (default), 'off' (CBR), 'constrained'
@@ -398,6 +404,22 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
         options.vbr = 'off';
       } else if (isVariableBitrate) {
         options.vbr = 'on';
+      }
+      // Packet loss percentage for FEC
+      if (opusConfig?.packetlossperc !== undefined) {
+        options.packet_loss = String(opusConfig.packetlossperc);
+      }
+      // In-band FEC
+      if (opusConfig?.useinbandfec !== undefined) {
+        options.fec = opusConfig.useinbandfec ? '1' : '0';
+      }
+      // Discontinuous transmission
+      if (opusConfig?.usedtx !== undefined) {
+        options.dtx = opusConfig.usedtx ? '1' : '0';
+      }
+      // Complexity (0-10)
+      if (opusConfig?.complexity !== undefined) {
+        options.compression_level = String(opusConfig.complexity);
       }
     }
 

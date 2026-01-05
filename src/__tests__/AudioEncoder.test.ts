@@ -458,4 +458,199 @@ describe('AudioEncoder', () => {
       }).toThrow('Encoder is closed');
     });
   });
+
+  describe('Opus codec-specific config validation', () => {
+    it('should accept valid Opus config with packetlossperc', async () => {
+      const support = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        opus: {
+          packetlossperc: 10,
+        },
+      });
+
+      expect(support.supported).toBe(true);
+      expect(support.config.opus?.packetlossperc).toBe(10);
+    });
+
+    it('should reject Opus config with packetlossperc < 0', async () => {
+      const support = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        opus: {
+          packetlossperc: -1,
+        },
+      });
+
+      expect(support.supported).toBe(false);
+    });
+
+    it('should reject Opus config with packetlossperc > 100', async () => {
+      const support = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        opus: {
+          packetlossperc: 101,
+        },
+      });
+
+      expect(support.supported).toBe(false);
+    });
+
+    it('should accept packetlossperc at boundary values (0 and 100)', async () => {
+      const support0 = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        opus: { packetlossperc: 0 },
+      });
+      expect(support0.supported).toBe(true);
+
+      const support100 = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        opus: { packetlossperc: 100 },
+      });
+      expect(support100.supported).toBe(true);
+    });
+
+    it('should accept valid Opus frameDuration values', async () => {
+      const validDurations = [2500, 5000, 10000, 20000, 40000, 60000];
+      for (const frameDuration of validDurations) {
+        const support = await AudioEncoder.isConfigSupported({
+          codec: 'opus',
+          sampleRate: 48000,
+          numberOfChannels: 2,
+          opus: { frameDuration },
+        });
+        expect(support.supported).toBe(true);
+        expect(support.config.opus?.frameDuration).toBe(frameDuration);
+      }
+    });
+
+    it('should reject invalid Opus frameDuration', async () => {
+      const support = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        opus: { frameDuration: 15000 }, // Invalid value
+      });
+
+      expect(support.supported).toBe(false);
+    });
+
+    it('should accept valid Opus complexity values (0-10)', async () => {
+      for (let complexity = 0; complexity <= 10; complexity++) {
+        const support = await AudioEncoder.isConfigSupported({
+          codec: 'opus',
+          sampleRate: 48000,
+          numberOfChannels: 2,
+          opus: { complexity },
+        });
+        expect(support.supported).toBe(true);
+      }
+    });
+
+    it('should reject invalid Opus complexity', async () => {
+      const supportNeg = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        opus: { complexity: -1 },
+      });
+      expect(supportNeg.supported).toBe(false);
+
+      const supportHigh = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        opus: { complexity: 11 },
+      });
+      expect(supportHigh.supported).toBe(false);
+    });
+
+    it('should accept full Opus config with all options', async () => {
+      const support = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        opus: {
+          frameDuration: 20000,
+          application: 'audio',
+          packetlossperc: 5,
+          useinbandfec: true,
+          usedtx: false,
+          complexity: 8,
+        },
+      });
+
+      expect(support.supported).toBe(true);
+      expect(support.config.opus).toEqual({
+        frameDuration: 20000,
+        application: 'audio',
+        packetlossperc: 5,
+        useinbandfec: true,
+        usedtx: false,
+        complexity: 8,
+      });
+    });
+
+    it('should strip unknown fields from Opus config', async () => {
+      const support = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        opus: {
+          packetlossperc: 10,
+          unknownField: 'should be stripped',
+        } as any,
+      });
+
+      expect(support.supported).toBe(true);
+      expect(support.config.opus?.packetlossperc).toBe(10);
+      expect((support.config.opus as any)?.unknownField).toBeUndefined();
+    });
+  });
+
+  describe('AAC codec-specific config', () => {
+    it('should accept AAC config with format', async () => {
+      const supportAac = await AudioEncoder.isConfigSupported({
+        codec: 'aac',
+        sampleRate: 44100,
+        numberOfChannels: 2,
+        aac: { format: 'aac' },
+      });
+      expect(supportAac.supported).toBe(true);
+      expect(supportAac.config.aac?.format).toBe('aac');
+
+      const supportAdts = await AudioEncoder.isConfigSupported({
+        codec: 'aac',
+        sampleRate: 44100,
+        numberOfChannels: 2,
+        aac: { format: 'adts' },
+      });
+      expect(supportAdts.supported).toBe(true);
+      expect(supportAdts.config.aac?.format).toBe('adts');
+    });
+
+    it('should strip unknown fields from AAC config', async () => {
+      const support = await AudioEncoder.isConfigSupported({
+        codec: 'aac',
+        sampleRate: 44100,
+        numberOfChannels: 2,
+        aac: {
+          format: 'aac',
+          unknownField: 'should be stripped',
+        } as any,
+      });
+
+      expect(support.supported).toBe(true);
+      expect(support.config.aac?.format).toBe('aac');
+      expect((support.config.aac as any)?.unknownField).toBeUndefined();
+    });
+  });
 });

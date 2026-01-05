@@ -23,6 +23,10 @@ export interface VideoFrameBufferInit {
   displayWidth?: number;
   displayHeight?: number;
   colorSpace?: VideoColorSpaceInit;
+  /** Frame rotation in degrees (0, 90, 180, 270) */
+  rotation?: 0 | 90 | 180 | 270;
+  /** Whether to flip the frame horizontally */
+  flip?: boolean;
 }
 
 /**
@@ -36,6 +40,10 @@ export interface VideoFrameInit {
   displayWidth?: number;
   displayHeight?: number;
   colorSpace?: VideoColorSpaceInit;
+  /** Frame rotation in degrees (0, 90, 180, 270) */
+  rotation?: 0 | 90 | 180 | 270;
+  /** Whether to flip the frame horizontally */
+  flip?: boolean;
 }
 
 /**

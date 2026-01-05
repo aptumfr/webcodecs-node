@@ -559,6 +559,13 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     } else {
       options.preset = '6';
     }
+
+    // Apply AV1-specific options from config
+    if (this.config?.av1?.forceScreenContentTools) {
+      // Enable screen content tools for better compression of screen content
+      // This enables palette mode and intra block copy which are useful for screen sharing
+      options['enable-screen-content-mode'] = '1';
+    }
   }
 
   private configureX26xOptions(options: Record<string, string | number>, hwType?: string): void {

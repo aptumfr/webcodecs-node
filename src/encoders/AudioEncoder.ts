@@ -37,8 +37,8 @@ export interface OpusEncoderConfig {
   frameDuration?: number;
   /** Opus application mode */
   application?: 'voip' | 'audio' | 'lowdelay';
-  /** Packet loss percentage for forward error correction (0-100) */
-  packetLossPerc?: number;
+  /** Packet loss percentage for forward error correction (0-100) - per WebCodecs spec (lowercase) */
+  packetlossperc?: number;
   /** Use in-band forward error correction */
   useinbandfec?: boolean;
   /** Use discontinuous transmission mode (for silence suppression) */
@@ -176,6 +176,31 @@ export class AudioEncoder extends WebCodecsEventTarget {
       return { supported: false, config };
     }
 
+    const codecBase = getCodecBase(config.codec);
+
+    // Validate Opus-specific config per WebCodecs Opus codec registration
+    if (codecBase === 'opus' && config.opus) {
+      // packetlossperc must be 0-100
+      if (config.opus.packetlossperc !== undefined) {
+        if (config.opus.packetlossperc < 0 || config.opus.packetlossperc > 100) {
+          return { supported: false, config };
+        }
+      }
+      // frameDuration must be one of the valid values
+      const validFrameDurations = [2500, 5000, 10000, 20000, 40000, 60000, 80000, 100000, 120000];
+      if (config.opus.frameDuration !== undefined) {
+        if (!validFrameDurations.includes(config.opus.frameDuration)) {
+          return { supported: false, config };
+        }
+      }
+      // complexity must be 0-10
+      if (config.opus.complexity !== undefined) {
+        if (config.opus.complexity < 0 || config.opus.complexity > 10) {
+          return { supported: false, config };
+        }
+      }
+    }
+
     // Clone the config per WebCodecs spec
     const clonedConfig: AudioEncoderConfig = {
       codec: config.codec,
@@ -188,10 +213,28 @@ export class AudioEncoder extends WebCodecsEventTarget {
     if (config.bitrateMode !== undefined) clonedConfig.bitrateMode = config.bitrateMode;
     if (config.latencyMode !== undefined) clonedConfig.latencyMode = config.latencyMode;
     if (config.format !== undefined) clonedConfig.format = config.format;
-    if (config.opus !== undefined) clonedConfig.opus = { ...config.opus };
-    if (config.aac !== undefined) clonedConfig.aac = { ...config.aac };
 
-    const codecBase = getCodecBase(config.codec);
+    // Clone Opus config with defaults per WebCodecs spec
+    if (codecBase === 'opus' && config.opus) {
+      const opusConfig: OpusEncoderConfig = {};
+      // Only copy known fields (strip unknown)
+      if (config.opus.frameDuration !== undefined) opusConfig.frameDuration = config.opus.frameDuration;
+      if (config.opus.application !== undefined) opusConfig.application = config.opus.application;
+      if (config.opus.packetlossperc !== undefined) opusConfig.packetlossperc = config.opus.packetlossperc;
+      if (config.opus.useinbandfec !== undefined) opusConfig.useinbandfec = config.opus.useinbandfec;
+      if (config.opus.usedtx !== undefined) opusConfig.usedtx = config.opus.usedtx;
+      if (config.opus.signal !== undefined) opusConfig.signal = config.opus.signal;
+      if (config.opus.complexity !== undefined) opusConfig.complexity = config.opus.complexity;
+      clonedConfig.opus = opusConfig;
+    }
+
+    // Clone AAC config (strip unknown fields)
+    if (config.aac) {
+      const aacConfig: AacEncoderConfig = {};
+      if (config.aac.format !== undefined) aacConfig.format = config.aac.format;
+      clonedConfig.aac = aacConfig;
+    }
+
     const supported = codecBase in AUDIO_ENCODER_CODEC_MAP || config.codec in AUDIO_ENCODER_CODEC_MAP;
 
     return { supported, config: clonedConfig };
@@ -414,6 +457,8 @@ export class AudioEncoder extends WebCodecsEventTarget {
       bitrate: this._config.bitrate,
       bitrateMode: this._config.bitrateMode,
       latencyMode: this._config.latencyMode,
+      opus: this._config.opus,
+      aac: this._config.aac,
     });
 
     this._encoder.on('encodedFrame', (frame: { data: Buffer; timestamp: number; keyFrame: boolean; description?: Buffer }) => {
