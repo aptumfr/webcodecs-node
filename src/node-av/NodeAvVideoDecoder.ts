@@ -50,8 +50,13 @@ const logger = createLogger('NodeAvVideoDecoder');
 /** Maximum filter chain fallback attempts */
 const MAX_FILTER_CHAIN_ATTEMPTS = 10;
 
-/** Known problematic hardware decoders */
-const SKIP_HARDWARE_CODECS = ['vp9', 'av1'];
+/**
+ * Codecs to skip for hardware decoding.
+ * Empty by default - hardware decoding is attempted for all codecs when requested.
+ * Can be populated if specific codecs are known to fail on certain hardware.
+ * Previously VP9/AV1 were skipped, but modern VAAPI/QSV support these well.
+ */
+const SKIP_HARDWARE_CODECS: string[] = [];
 
 /**
  * NodeAV-backed video decoder implementing VideoDecoderBackend interface
@@ -177,9 +182,11 @@ export class NodeAvVideoDecoder extends EventEmitter implements VideoDecoderBack
       params.extradata = Buffer.from(this.config.description);
     }
 
-    // Only try hardware if explicitly requested and not a known problematic codec
+    // Try hardware decoding unless explicitly disabled or codec is on skip list
+    // 'no-preference' and 'prefer-hardware' both enable hardware acceleration
+    // 'prefer-software' disables hardware acceleration
     const shouldTryHardware =
-      this.hardwarePreference === 'prefer-hardware' &&
+      this.hardwarePreference !== 'prefer-software' &&
       !SKIP_HARDWARE_CODECS.includes(codecName);
 
     if (shouldTryHardware) {

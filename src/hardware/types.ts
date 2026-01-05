@@ -72,28 +72,34 @@ export const HARDWARE_ENCODERS: Omit<HardwareEncoderInfo, 'available'>[] = [
 ];
 
 // Hardware decoder definitions
-// CUVID (NVDEC) is preferred on NVIDIA (native), QSV for Intel.
-// Note: VAAPI decoding can be added if needed but requires specific setup.
+// CUVID (NVDEC) is preferred on NVIDIA (native), QSV for Intel, VAAPI for Linux.
+// Note: VAAPI decoding uses the standard decoder (h264, hevc, etc.) with hwaccel mode,
+// not separate decoder names. We use 'h264_vaapi' etc. as logical names for detection.
 export const HARDWARE_DECODERS: Omit<HardwareDecoderInfo, 'available'>[] = [
   // H.264 decoders
   { name: 'h264_cuvid', hwaccel: 'cuda', codec: 'h264', priority: 1 },
   { name: 'h264_qsv', hwaccel: 'qsv', codec: 'h264', priority: 2 },
+  { name: 'h264_vaapi', hwaccel: 'vaapi', codec: 'h264', priority: 3 },
 
   // HEVC decoders
   { name: 'hevc_cuvid', hwaccel: 'cuda', codec: 'hevc', priority: 1 },
   { name: 'hevc_qsv', hwaccel: 'qsv', codec: 'hevc', priority: 2 },
+  { name: 'hevc_vaapi', hwaccel: 'vaapi', codec: 'hevc', priority: 3 },
 
   // VP8 decoders
   { name: 'vp8_cuvid', hwaccel: 'cuda', codec: 'vp8', priority: 1 },
   { name: 'vp8_qsv', hwaccel: 'qsv', codec: 'vp8', priority: 2 },
+  { name: 'vp8_vaapi', hwaccel: 'vaapi', codec: 'vp8', priority: 3 },
 
   // VP9 decoders
   { name: 'vp9_cuvid', hwaccel: 'cuda', codec: 'vp9', priority: 1 },
   { name: 'vp9_qsv', hwaccel: 'qsv', codec: 'vp9', priority: 2 },
+  { name: 'vp9_vaapi', hwaccel: 'vaapi', codec: 'vp9', priority: 3 },
 
   // AV1 decoders
   { name: 'av1_cuvid', hwaccel: 'cuda', codec: 'av1', priority: 1 },
   { name: 'av1_qsv', hwaccel: 'qsv', codec: 'av1', priority: 2 },
+  { name: 'av1_vaapi', hwaccel: 'vaapi', codec: 'av1', priority: 3 },
 ];
 
 // Software encoder fallbacks
