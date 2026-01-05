@@ -5,7 +5,8 @@
  * These functions operate on raw pixel buffers without requiring a VideoFrame instance.
  */
 
-import { rgbaToYuv, yuvToRgba } from '../color-space.js';
+import { rgbaToYuv, yuvToRgba, getColorMatrix, type ColorMatrix } from '../color-space.js';
+import type { VideoColorSpaceInit } from '../color-space.js';
 import { getPlaneInfo, isRgbFormat, isBgrFormat, type VideoPixelFormat } from '../pixel-formats.js';
 import { acquireBuffer, releaseBuffer } from '../../utils/buffer-pool.js';
 
@@ -154,6 +155,7 @@ export function convertRgbToRgb(
 
 /**
  * Convert YUV to RGB format
+ * @param colorMatrix Optional color matrix for conversion (default: bt709)
  */
 export function convertYuvToRgb(
   src: FrameBuffer,
@@ -162,7 +164,8 @@ export function convertYuvToRgb(
   srcX: number,
   srcY: number,
   srcW: number,
-  srcH: number
+  srcH: number,
+  colorMatrix: ColorMatrix = 'bt709'
 ): void {
   const isBgr = isBgrFormat(destFormat);
   const yOffset = getPlaneOffset(src.format, src.width, src.height, 0);
@@ -176,7 +179,7 @@ export function convertYuvToRgb(
 
       const yVal = src.data[yOffset + absY * yStride + absX];
       const [uVal, vVal] = getUvAt(src.data, src.format, src.width, src.height, absX, absY);
-      const [r, g, b, a] = yuvToRgba(yVal, uVal, vVal);
+      const [r, g, b, a] = yuvToRgba(yVal, uVal, vVal, colorMatrix);
 
       if (isBgr) {
         dest[destOffset++] = b;
@@ -195,6 +198,7 @@ export function convertYuvToRgb(
 
 /**
  * Convert RGB to YUV format
+ * @param colorMatrix Optional color matrix for conversion (default: bt709)
  */
 export function convertRgbToYuv(
   src: FrameBuffer,
@@ -203,7 +207,8 @@ export function convertRgbToYuv(
   srcX: number,
   srcY: number,
   srcW: number,
-  srcH: number
+  srcH: number,
+  colorMatrix: ColorMatrix = 'bt709'
 ): void {
   const isBgr = isBgrFormat(src.format);
   const srcStride = src.width * 4;
@@ -220,7 +225,7 @@ export function convertRgbToYuv(
       const g = src.data[srcOffset + 1];
       const b = isBgr ? src.data[srcOffset] : src.data[srcOffset + 2];
 
-      const [yVal] = rgbaToYuv(r, g, b);
+      const [yVal] = rgbaToYuv(r, g, b, colorMatrix);
       dest[y * srcW + x] = yVal;
     }
   }
@@ -240,7 +245,7 @@ export function convertRgbToYuv(
         const g = src.data[srcOffset + 1];
         const b = isBgr ? src.data[srcOffset] : src.data[srcOffset + 2];
 
-        const [, uVal, vVal] = rgbaToYuv(r, g, b);
+        const [, uVal, vVal] = rgbaToYuv(r, g, b, colorMatrix);
         dest[uOffset + y * chromaW + x] = uVal;
         dest[vOffset + y * chromaW + x] = vVal;
       }
@@ -268,7 +273,7 @@ export function convertRgbToYuv(
         const g = src.data[srcOffset + 1];
         const b = isBgr ? src.data[srcOffset] : src.data[srcOffset + 2];
 
-        const [, uVal, vVal] = rgbaToYuv(r, g, b);
+        const [, uVal, vVal] = rgbaToYuv(r, g, b, colorMatrix);
         dest[uvOffset + y * srcW + x * 2] = uVal;
         dest[uvOffset + y * srcW + x * 2 + 1] = vVal;
       }
@@ -431,6 +436,7 @@ export function convertI420ToNv12(i420: Uint8Array | Buffer, width: number, heig
 
 /**
  * Convert between any two pixel formats
+ * @param colorSpace Optional color space for matrix selection (default: bt709)
  */
 export function convertFrameFormat(
   src: FrameBuffer,
@@ -439,10 +445,12 @@ export function convertFrameFormat(
   srcX: number = 0,
   srcY: number = 0,
   srcW?: number,
-  srcH?: number
+  srcH?: number,
+  colorSpace?: VideoColorSpaceInit
 ): void {
   const width = srcW ?? src.width;
   const height = srcH ?? src.height;
+  const colorMatrix = getColorMatrix(colorSpace?.matrix);
 
   const srcIsRgb = isRgbFormat(src.format);
   const destIsRgb = isRgbFormat(destFormat);
@@ -450,15 +458,15 @@ export function convertFrameFormat(
   if (srcIsRgb && destIsRgb) {
     convertRgbToRgb(src, dest, destFormat, srcX, srcY, width, height);
   } else if (!srcIsRgb && destIsRgb) {
-    convertYuvToRgb(src, dest, destFormat, srcX, srcY, width, height);
+    convertYuvToRgb(src, dest, destFormat, srcX, srcY, width, height, colorMatrix);
   } else if (srcIsRgb && !destIsRgb) {
-    convertRgbToYuv(src, dest, destFormat, srcX, srcY, width, height);
+    convertRgbToYuv(src, dest, destFormat, srcX, srcY, width, height, colorMatrix);
   } else {
     // YUV to YUV - convert via RGB using pooled buffer
     const rgbaSize = width * height * 4;
     const rgbaBuffer = acquireBuffer(rgbaSize);
     try {
-      convertYuvToRgb(src, rgbaBuffer, 'RGBA', srcX, srcY, width, height);
+      convertYuvToRgb(src, rgbaBuffer, 'RGBA', srcX, srcY, width, height, colorMatrix);
 
       const tempSrc: FrameBuffer = {
         data: rgbaBuffer,
@@ -466,7 +474,7 @@ export function convertFrameFormat(
         width,
         height,
       };
-      convertRgbToYuv(tempSrc, dest, destFormat, 0, 0, width, height);
+      convertRgbToYuv(tempSrc, dest, destFormat, 0, 0, width, height, colorMatrix);
     } finally {
       // Return buffer to pool for reuse
       releaseBuffer(rgbaBuffer);

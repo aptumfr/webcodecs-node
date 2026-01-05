@@ -27,6 +27,8 @@ export interface VideoFrameBufferInit {
   rotation?: 0 | 90 | 180 | 270;
   /** Whether to flip the frame horizontally */
   flip?: boolean;
+  /** ArrayBuffers to detach after frame construction (transfer ownership) */
+  transfer?: ArrayBuffer[];
 }
 
 /**
@@ -53,4 +55,10 @@ export interface VideoFrameCopyToOptions {
   rect?: DOMRectInit;
   layout?: PlaneLayout[];
   format?: VideoPixelFormat;
+  /**
+   * Target color space for the copy operation.
+   * When converting between YUV and RGB, the color space determines
+   * which conversion matrix coefficients are used.
+   */
+  colorSpace?: VideoColorSpaceInit;
 }

@@ -475,29 +475,27 @@ describe('AudioEncoder', () => {
     });
 
     it('should reject Opus config with packetlossperc < 0', async () => {
-      const support = await AudioEncoder.isConfigSupported({
+      // Invalid packetlossperc should throw TypeError per WebCodecs spec
+      await expect(AudioEncoder.isConfigSupported({
         codec: 'opus',
         sampleRate: 48000,
         numberOfChannels: 2,
         opus: {
           packetlossperc: -1,
         },
-      });
-
-      expect(support.supported).toBe(false);
+      })).rejects.toThrow(TypeError);
     });
 
     it('should reject Opus config with packetlossperc > 100', async () => {
-      const support = await AudioEncoder.isConfigSupported({
+      // Invalid packetlossperc should throw TypeError per WebCodecs spec
+      await expect(AudioEncoder.isConfigSupported({
         codec: 'opus',
         sampleRate: 48000,
         numberOfChannels: 2,
         opus: {
           packetlossperc: 101,
         },
-      });
-
-      expect(support.supported).toBe(false);
+      })).rejects.toThrow(TypeError);
     });
 
     it('should accept packetlossperc at boundary values (0 and 100)', async () => {
@@ -533,14 +531,13 @@ describe('AudioEncoder', () => {
     });
 
     it('should reject invalid Opus frameDuration', async () => {
-      const support = await AudioEncoder.isConfigSupported({
+      // Invalid frameDuration should throw TypeError per WebCodecs spec
+      await expect(AudioEncoder.isConfigSupported({
         codec: 'opus',
         sampleRate: 48000,
         numberOfChannels: 2,
         opus: { frameDuration: 15000 }, // Invalid value
-      });
-
-      expect(support.supported).toBe(false);
+      })).rejects.toThrow(TypeError);
     });
 
     it('should accept valid Opus complexity values (0-10)', async () => {
@@ -556,21 +553,20 @@ describe('AudioEncoder', () => {
     });
 
     it('should reject invalid Opus complexity', async () => {
-      const supportNeg = await AudioEncoder.isConfigSupported({
+      // Invalid complexity values should throw TypeError per WebCodecs spec
+      await expect(AudioEncoder.isConfigSupported({
         codec: 'opus',
         sampleRate: 48000,
         numberOfChannels: 2,
         opus: { complexity: -1 },
-      });
-      expect(supportNeg.supported).toBe(false);
+      })).rejects.toThrow(TypeError);
 
-      const supportHigh = await AudioEncoder.isConfigSupported({
+      await expect(AudioEncoder.isConfigSupported({
         codec: 'opus',
         sampleRate: 48000,
         numberOfChannels: 2,
         opus: { complexity: 11 },
-      });
-      expect(supportHigh.supported).toBe(false);
+      })).rejects.toThrow(TypeError);
     });
 
     it('should accept full Opus config with all options', async () => {
@@ -579,22 +575,27 @@ describe('AudioEncoder', () => {
         sampleRate: 48000,
         numberOfChannels: 2,
         opus: {
+          format: 'opus',
           frameDuration: 20000,
           application: 'audio',
           packetlossperc: 5,
           useinbandfec: true,
           usedtx: false,
+          signal: 'music',
           complexity: 8,
         },
       });
 
       expect(support.supported).toBe(true);
+      // Should include all values including defaults filled in
       expect(support.config.opus).toEqual({
+        format: 'opus',
         frameDuration: 20000,
         application: 'audio',
         packetlossperc: 5,
         useinbandfec: true,
         usedtx: false,
+        signal: 'music',
         complexity: 8,
       });
     });
@@ -651,6 +652,222 @@ describe('AudioEncoder', () => {
       expect(support.supported).toBe(true);
       expect(support.config.aac?.format).toBe('aac');
       expect((support.config.aac as any)?.unknownField).toBeUndefined();
+    });
+
+    it('should throw TypeError for invalid AAC format', async () => {
+      await expect(AudioEncoder.isConfigSupported({
+        codec: 'aac',
+        sampleRate: 44100,
+        numberOfChannels: 2,
+        aac: { format: 'invalid' as any },
+      })).rejects.toThrow(TypeError);
+    });
+  });
+
+  describe('isConfigSupported TypeError validation (N10 fix)', () => {
+    it('should throw TypeError for missing codec', async () => {
+      await expect(AudioEncoder.isConfigSupported({
+        sampleRate: 48000,
+        numberOfChannels: 2,
+      } as any)).rejects.toThrow(TypeError);
+    });
+
+    it('should throw TypeError for empty codec string', async () => {
+      await expect(AudioEncoder.isConfigSupported({
+        codec: '',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+      })).rejects.toThrow(TypeError);
+    });
+
+    it('should throw TypeError for missing sampleRate', async () => {
+      await expect(AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        numberOfChannels: 2,
+      } as any)).rejects.toThrow(TypeError);
+    });
+
+    it('should throw TypeError for non-positive sampleRate', async () => {
+      await expect(AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 0,
+        numberOfChannels: 2,
+      })).rejects.toThrow(TypeError);
+
+      await expect(AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: -1,
+        numberOfChannels: 2,
+      })).rejects.toThrow(TypeError);
+    });
+
+    it('should throw TypeError for non-finite sampleRate', async () => {
+      await expect(AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: NaN,
+        numberOfChannels: 2,
+      })).rejects.toThrow(TypeError);
+
+      await expect(AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: Infinity,
+        numberOfChannels: 2,
+      })).rejects.toThrow(TypeError);
+    });
+
+    it('should throw TypeError for missing numberOfChannels', async () => {
+      await expect(AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+      } as any)).rejects.toThrow(TypeError);
+    });
+
+    it('should throw TypeError for non-integer numberOfChannels', async () => {
+      await expect(AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2.5,
+      })).rejects.toThrow(TypeError);
+    });
+
+    it('should throw TypeError for non-positive numberOfChannels', async () => {
+      await expect(AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 0,
+      })).rejects.toThrow(TypeError);
+    });
+
+    it('should throw TypeError for invalid bitrateMode', async () => {
+      await expect(AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        bitrateMode: 'invalid' as any,
+      })).rejects.toThrow(TypeError);
+    });
+
+    it('should throw TypeError for invalid latencyMode', async () => {
+      await expect(AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        latencyMode: 'invalid' as any,
+      })).rejects.toThrow(TypeError);
+    });
+  });
+
+  describe('Opus bitrate bounds validation (N10 fix)', () => {
+    it('should return supported:false for Opus bitrate below 6kbps', async () => {
+      const support = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        bitrate: 5000, // Below 6kbps minimum
+      });
+      expect(support.supported).toBe(false);
+    });
+
+    it('should return supported:false for Opus bitrate above 510kbps', async () => {
+      const support = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        bitrate: 520000, // Above 510kbps maximum
+      });
+      expect(support.supported).toBe(false);
+    });
+
+    it('should accept Opus bitrate at boundaries', async () => {
+      const supportMin = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        bitrate: 6000, // Exactly 6kbps
+      });
+      expect(supportMin.supported).toBe(true);
+
+      const supportMax = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        bitrate: 510000, // Exactly 510kbps
+      });
+      expect(supportMax.supported).toBe(true);
+    });
+
+    it('should return supported:false for Opus with >255 channels', async () => {
+      const support = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 256,
+      });
+      expect(support.supported).toBe(false);
+    });
+  });
+
+  describe('Opus format validation (N10 fix)', () => {
+    it('should accept opus.format = opus', async () => {
+      const support = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        opus: { format: 'opus' },
+      });
+      expect(support.supported).toBe(true);
+      expect(support.config.opus?.format).toBe('opus');
+    });
+
+    it('should accept opus.format = ogg', async () => {
+      const support = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        opus: { format: 'ogg' },
+      });
+      expect(support.supported).toBe(true);
+      expect(support.config.opus?.format).toBe('ogg');
+    });
+
+    it('should throw TypeError for invalid opus.format', async () => {
+      await expect(AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        opus: { format: 'invalid' as any },
+      })).rejects.toThrow(TypeError);
+    });
+
+    it('should fill default opus.format when not provided', async () => {
+      const support = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+      });
+      expect(support.supported).toBe(true);
+      expect(support.config.opus?.format).toBe('opus');
+    });
+  });
+
+  describe('Opus defaults (N10 fix)', () => {
+    it('should fill all Opus defaults when no opus config provided', async () => {
+      const support = await AudioEncoder.isConfigSupported({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+      });
+
+      expect(support.supported).toBe(true);
+      expect(support.config.opus).toEqual({
+        format: 'opus',
+        frameDuration: 20000,
+        application: 'audio',
+        packetlossperc: 0,
+        useinbandfec: false,
+        usedtx: false,
+        signal: 'auto',
+        complexity: 10,
+      });
     });
   });
 });

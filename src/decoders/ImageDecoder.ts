@@ -4,6 +4,7 @@
  */
 
 import { VideoFrame } from '../core/VideoFrame.js';
+import type { VideoPixelFormat } from '../core/VideoFrame.js';
 import { DOMException } from '../types/index.js';
 import { createLogger } from '../utils/index.js';
 import type { VideoColorSpaceInit } from '../formats/index.js';
@@ -24,6 +25,17 @@ export interface ImageDecoderInit {
   preferAnimation?: boolean;
   premultiplyAlpha?: PremultiplyAlpha;
   transfer?: ArrayBuffer[];
+  /**
+   * Preferred output pixel format.
+   * - 'RGBA' (default): RGB with alpha channel, suitable for display
+   * - 'I420': YUV 4:2:0 planar, efficient for video processing
+   * - 'I420P10': 10-bit YUV 4:2:0, for HDR content (AVIF, etc.)
+   * - Other formats as supported by the decoder
+   *
+   * Note: WebP images always output RGBA due to node-webpmux limitations.
+   * JPEG/AVIF can output I420 directly for better performance.
+   */
+  preferredPixelFormat?: VideoPixelFormat;
 }
 
 export interface ImageDecodeOptions {
@@ -221,6 +233,7 @@ export class ImageDecoder {
   private _visibleAnimated: boolean = false;
   private _visibleRepetitionCount: number = 1;
   private _preferredColorSpace: VideoColorSpaceInit | undefined;
+  private _preferredPixelFormat: VideoPixelFormat;
   private _orientation: number = 1;
   private _orientationEvaluated = false;
 
@@ -232,6 +245,7 @@ export class ImageDecoder {
     duration: number;
     complete: boolean;
     colorSpace?: VideoColorSpaceInit;
+    format: VideoPixelFormat;
   }> = [];
   private _framesParsed: boolean = false;
   private _repetitionCount: number | undefined = undefined;
@@ -252,7 +266,8 @@ export class ImageDecoder {
     this._premultiplyAlpha = init.premultiplyAlpha ?? 'default';
     this._desiredWidth = init.desiredWidth;
     this._desiredHeight = init.desiredHeight;
-    this._preferAnimation = init.preferAnimation ?? false;
+    this._preferAnimation = init.preferAnimation ?? true;
+    this._preferredPixelFormat = init.preferredPixelFormat ?? 'RGBA';
     this._preferredColorSpace = this._colorSpaceConversion === 'default'
       ? { primaries: 'bt709', transfer: 'iec61966-2-1', matrix: 'rgb', fullRange: true }
       : undefined;
@@ -362,13 +377,37 @@ export class ImageDecoder {
     this._framesParsed = true;
     this._updateVisibleTrackInfo();
 
-    const track = new ImageTrack({
-      animated: this._visibleAnimated,
-      frameCount: this._visibleFrameCount,
-      repetitionCount: this._visibleRepetitionCount,
-      selected: true,
-    });
-    this._tracks._addTrack(track);
+    const isAnimated = this._frames.length > 1;
+
+    if (isAnimated) {
+      // For animated images, create two tracks:
+      // Track 0: Still (first frame only) - selected when preferAnimation=false
+      // Track 1: Animated (all frames) - selected when preferAnimation=true
+      const stillTrack = new ImageTrack({
+        animated: false,
+        frameCount: 1,
+        repetitionCount: 0, // Still images have repetitionCount=0 per spec
+        selected: !this._preferAnimation,
+      });
+      this._tracks._addTrack(stillTrack);
+
+      const animatedTrack = new ImageTrack({
+        animated: true,
+        frameCount: this._visibleFrameCount,
+        repetitionCount: this._visibleRepetitionCount,
+        selected: this._preferAnimation,
+      });
+      this._tracks._addTrack(animatedTrack);
+    } else {
+      // Single frame image - just one track
+      const track = new ImageTrack({
+        animated: false,
+        frameCount: 1,
+        repetitionCount: 0,
+        selected: true,
+      });
+      this._tracks._addTrack(track);
+    }
   }
 
   private _frameTypeSupportsAlpha(): boolean {
@@ -659,16 +698,21 @@ export class ImageDecoder {
       desiredWidth: this._desiredWidth,
       desiredHeight: this._desiredHeight,
       colorSpace: this._preferredColorSpace,
+      preferredFormat: this._preferredPixelFormat,
     });
 
     try {
       const decodedFrames = await nodeAvDecoder.decode();
 
       for (const frame of decodedFrames) {
-        // Apply premultiplication if needed
-        const processed = this._processFrameData(frame.data);
-        // Apply orientation correction for JPEG
-        const oriented = this._applyOrientation(processed, frame.width, frame.height);
+        // Apply premultiplication if needed (only for RGBA)
+        const processed = frame.format === 'RGBA'
+          ? this._processFrameData(frame.data)
+          : frame.data;
+        // Apply orientation correction for JPEG (only for RGBA)
+        const oriented = frame.format === 'RGBA'
+          ? this._applyOrientation(processed, frame.width, frame.height)
+          : { data: processed, width: frame.width, height: frame.height };
 
         this._frames.push({
           data: oriented.data,
@@ -678,6 +722,7 @@ export class ImageDecoder {
           duration: frame.duration,
           complete: frame.complete,
           colorSpace: frame.colorSpace,
+          format: frame.format,
         });
       }
     } finally {
@@ -700,7 +745,7 @@ export class ImageDecoder {
       const decodedFrames = await webpDecoder.decode();
 
       for (const frame of decodedFrames) {
-        // Apply premultiplication if needed
+        // Apply premultiplication if needed (WebP always outputs RGBA)
         const processed = this._processFrameData(frame.data);
 
         this._frames.push({
@@ -711,6 +756,7 @@ export class ImageDecoder {
           duration: frame.duration,
           complete: frame.complete,
           colorSpace: frame.colorSpace,
+          format: frame.format, // Always 'RGBA' for WebP
         });
       }
     } finally {
@@ -735,11 +781,13 @@ export class ImageDecoder {
       throw new Error('No frames decoded');
     }
 
-    // Note: Per WebCodecs spec, preferAnimation affects track selection when
-    // an image has both animated and still representations. Most animated
-    // formats (GIF, APNG, WebP) only have a single animated representation,
-    // so preferAnimation has no effect on them. Full implementation would
-    // require format-specific logic to detect alternative representations.
+    // Per WebCodecs spec, preferAnimation affects track selection when an image
+    // has multiple representations. For animated images, we create two tracks:
+    // - Track 0: Still image (first frame only)
+    // - Track 1: Animated (all frames)
+    // preferAnimation=true selects the animated track, false selects the still track.
+    // This allows applications to choose between playing animation or showing a
+    // static preview even for animated image formats.
   }
 
   get complete(): boolean { return this._complete; }
@@ -759,20 +807,22 @@ export class ImageDecoder {
     await this._completed;
 
     // Per WebCodecs spec, decode() requires a selected track
-    if (this._tracks.selectedTrack === null) {
+    const selectedTrack = this._tracks.selectedTrack;
+    if (selectedTrack === null) {
       throw new DOMException('No track selected', 'InvalidStateError');
     }
 
     const frameIndex = options?.frameIndex ?? 0;
-    const availableFrames = this._frames.length;
+    const trackFrameCount = selectedTrack.frameCount;
 
-    if (availableFrames === 0) {
+    if (this._frames.length === 0) {
       throw new DOMException('No frames available', 'InvalidStateError');
     }
 
-    if (frameIndex < 0 || frameIndex >= availableFrames) {
+    // Validate frameIndex against selected track's frame count
+    if (frameIndex < 0 || frameIndex >= trackFrameCount) {
       throw new DOMException(
-        `Frame index ${frameIndex} out of range (0-${availableFrames - 1})`,
+        `Frame index ${frameIndex} out of range (0-${trackFrameCount - 1})`,
         'InvalidStateError'
       );
     }
@@ -786,7 +836,7 @@ export class ImageDecoder {
     }
 
     const videoFrame = new VideoFrame(frame.data, {
-      format: 'RGBA',
+      format: frame.format,
       codedWidth: frame.width,
       codedHeight: frame.height,
       timestamp: frame.timestamp,

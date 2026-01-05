@@ -992,3 +992,426 @@ describe('VideoEncoder input formats', () => {
     encoder.close();
   }, 30000);
 });
+
+describe('VideoDecoder isConfigSupported validation (N12 fix)', () => {
+  it('should throw TypeError for invalid codedWidth', async () => {
+    await expect(VideoDecoder.isConfigSupported({
+      codec: 'avc1.42001E',
+      codedWidth: 0,
+      codedHeight: 480,
+    })).rejects.toThrow(TypeError);
+
+    await expect(VideoDecoder.isConfigSupported({
+      codec: 'avc1.42001E',
+      codedWidth: -100,
+      codedHeight: 480,
+    })).rejects.toThrow(TypeError);
+
+    await expect(VideoDecoder.isConfigSupported({
+      codec: 'avc1.42001E',
+      codedWidth: 640.5, // non-integer
+      codedHeight: 480,
+    })).rejects.toThrow(TypeError);
+
+    await expect(VideoDecoder.isConfigSupported({
+      codec: 'avc1.42001E',
+      codedWidth: NaN,
+      codedHeight: 480,
+    })).rejects.toThrow(TypeError);
+  });
+
+  it('should throw TypeError for invalid codedHeight', async () => {
+    await expect(VideoDecoder.isConfigSupported({
+      codec: 'avc1.42001E',
+      codedWidth: 640,
+      codedHeight: 0,
+    })).rejects.toThrow(TypeError);
+
+    await expect(VideoDecoder.isConfigSupported({
+      codec: 'avc1.42001E',
+      codedWidth: 640,
+      codedHeight: -100,
+    })).rejects.toThrow(TypeError);
+
+    await expect(VideoDecoder.isConfigSupported({
+      codec: 'avc1.42001E',
+      codedWidth: 640,
+      codedHeight: 480.5, // non-integer
+    })).rejects.toThrow(TypeError);
+  });
+
+  it('should throw TypeError for invalid displayAspectWidth', async () => {
+    await expect(VideoDecoder.isConfigSupported({
+      codec: 'avc1.42001E',
+      displayAspectWidth: 0,
+    })).rejects.toThrow(TypeError);
+
+    await expect(VideoDecoder.isConfigSupported({
+      codec: 'avc1.42001E',
+      displayAspectWidth: -16,
+    })).rejects.toThrow(TypeError);
+
+    await expect(VideoDecoder.isConfigSupported({
+      codec: 'avc1.42001E',
+      displayAspectWidth: 16.5, // non-integer
+    })).rejects.toThrow(TypeError);
+  });
+
+  it('should throw TypeError for invalid displayAspectHeight', async () => {
+    await expect(VideoDecoder.isConfigSupported({
+      codec: 'avc1.42001E',
+      displayAspectHeight: 0,
+    })).rejects.toThrow(TypeError);
+
+    await expect(VideoDecoder.isConfigSupported({
+      codec: 'avc1.42001E',
+      displayAspectHeight: -9,
+    })).rejects.toThrow(TypeError);
+
+    await expect(VideoDecoder.isConfigSupported({
+      codec: 'avc1.42001E',
+      displayAspectHeight: 9.5, // non-integer
+    })).rejects.toThrow(TypeError);
+  });
+
+  it('should accept valid codedWidth and codedHeight', async () => {
+    const support = await VideoDecoder.isConfigSupported({
+      codec: 'avc1.42001E',
+      codedWidth: 1920,
+      codedHeight: 1080,
+    });
+
+    expect(support.supported).toBe(true);
+    expect(support.config.codedWidth).toBe(1920);
+    expect(support.config.codedHeight).toBe(1080);
+  });
+
+  it('should accept valid displayAspectWidth and displayAspectHeight', async () => {
+    const support = await VideoDecoder.isConfigSupported({
+      codec: 'avc1.42001E',
+      displayAspectWidth: 16,
+      displayAspectHeight: 9,
+    });
+
+    expect(support.supported).toBe(true);
+    expect(support.config.displayAspectWidth).toBe(16);
+    expect(support.config.displayAspectHeight).toBe(9);
+  });
+
+  it('should clone config and strip unknown fields', async () => {
+    const support = await VideoDecoder.isConfigSupported({
+      codec: 'avc1.42001E',
+      unknownField: 'should be stripped',
+    } as any);
+
+    expect(support.supported).toBe(true);
+    expect((support.config as any).unknownField).toBeUndefined();
+  });
+});
+
+describe('VideoDecoder orientation output (P0.2)', () => {
+  it('should output frames with rotation from config', async () => {
+    const width = 64;
+    const height = 64;
+    const encodedChunks: EncodedVideoChunk[] = [];
+
+    const encoder = new VideoEncoder({
+      output: (chunk) => encodedChunks.push(chunk),
+      error: (err) => { throw err; },
+    });
+
+    encoder.configure({
+      codec: 'vp09.00.10.08',
+      width,
+      height,
+      bitrate: 500_000,
+      framerate: 30,
+    });
+
+    const data = new Uint8Array(width * height * 4);
+    for (let i = 0; i < data.length; i++) data[i] = 128;
+
+    const frame = new VideoFrame(data, {
+      format: 'RGBA',
+      codedWidth: width,
+      codedHeight: height,
+      timestamp: 0,
+    });
+
+    encoder.encode(frame, { keyFrame: true });
+    frame.close();
+    await encoder.flush();
+    encoder.close();
+
+    expect(encodedChunks.length).toBeGreaterThan(0);
+
+    // Decode with rotation config
+    const decodedFrames: VideoFrame[] = [];
+    const decoder = new VideoDecoder({
+      output: (f) => decodedFrames.push(f),
+      error: (err) => { throw err; },
+    });
+
+    decoder.configure({
+      codec: 'vp09.00.10.08',
+      codedWidth: width,
+      codedHeight: height,
+      rotation: 90,
+    });
+
+    decoder.decode(encodedChunks[0]);
+    await decoder.flush();
+    decoder.close();
+
+    expect(decodedFrames.length).toBe(1);
+    expect(decodedFrames[0].rotation).toBe(90);
+    // Display dimensions should be swapped for 90 degree rotation
+    expect(decodedFrames[0].displayWidth).toBe(height);
+    expect(decodedFrames[0].displayHeight).toBe(width);
+
+    decodedFrames[0].close();
+  }, 30000);
+
+  it('should output frames with flip from config', async () => {
+    const width = 64;
+    const height = 64;
+    const encodedChunks: EncodedVideoChunk[] = [];
+
+    const encoder = new VideoEncoder({
+      output: (chunk) => encodedChunks.push(chunk),
+      error: (err) => { throw err; },
+    });
+
+    encoder.configure({
+      codec: 'vp09.00.10.08',
+      width,
+      height,
+      bitrate: 500_000,
+      framerate: 30,
+    });
+
+    const data = new Uint8Array(width * height * 4);
+    for (let i = 0; i < data.length; i++) data[i] = 128;
+
+    const frame = new VideoFrame(data, {
+      format: 'RGBA',
+      codedWidth: width,
+      codedHeight: height,
+      timestamp: 0,
+    });
+
+    encoder.encode(frame, { keyFrame: true });
+    frame.close();
+    await encoder.flush();
+    encoder.close();
+
+    // Decode with flip config
+    const decodedFrames: VideoFrame[] = [];
+    const decoder = new VideoDecoder({
+      output: (f) => decodedFrames.push(f),
+      error: (err) => { throw err; },
+    });
+
+    decoder.configure({
+      codec: 'vp09.00.10.08',
+      codedWidth: width,
+      codedHeight: height,
+      flip: true,
+    });
+
+    decoder.decode(encodedChunks[0]);
+    await decoder.flush();
+    decoder.close();
+
+    expect(decodedFrames.length).toBe(1);
+    expect(decodedFrames[0].flip).toBe(true);
+
+    decodedFrames[0].close();
+  }, 30000);
+
+  it('should output frames with both rotation and flip from config', async () => {
+    const width = 64;
+    const height = 64;
+    const encodedChunks: EncodedVideoChunk[] = [];
+
+    const encoder = new VideoEncoder({
+      output: (chunk) => encodedChunks.push(chunk),
+      error: (err) => { throw err; },
+    });
+
+    encoder.configure({
+      codec: 'vp09.00.10.08',
+      width,
+      height,
+      bitrate: 500_000,
+      framerate: 30,
+    });
+
+    const data = new Uint8Array(width * height * 4);
+    for (let i = 0; i < data.length; i++) data[i] = 128;
+
+    const frame = new VideoFrame(data, {
+      format: 'RGBA',
+      codedWidth: width,
+      codedHeight: height,
+      timestamp: 0,
+    });
+
+    encoder.encode(frame, { keyFrame: true });
+    frame.close();
+    await encoder.flush();
+    encoder.close();
+
+    // Decode with rotation and flip config
+    const decodedFrames: VideoFrame[] = [];
+    const decoder = new VideoDecoder({
+      output: (f) => decodedFrames.push(f),
+      error: (err) => { throw err; },
+    });
+
+    decoder.configure({
+      codec: 'vp09.00.10.08',
+      codedWidth: width,
+      codedHeight: height,
+      rotation: 180,
+      flip: true,
+    });
+
+    decoder.decode(encodedChunks[0]);
+    await decoder.flush();
+    decoder.close();
+
+    expect(decodedFrames.length).toBe(1);
+    expect(decodedFrames[0].rotation).toBe(180);
+    expect(decodedFrames[0].flip).toBe(true);
+
+    decodedFrames[0].close();
+  }, 30000);
+});
+
+describe('VideoDecoder bitstream colorSpace (P0.10)', () => {
+  it('should report bitstream colorSpace when config colorSpace is not specified', async () => {
+    const width = 64;
+    const height = 64;
+    const encodedChunks: EncodedVideoChunk[] = [];
+
+    // Encode with specific colorSpace
+    const encoder = new VideoEncoder({
+      output: (chunk) => encodedChunks.push(chunk),
+      error: (err) => { throw err; },
+    });
+
+    encoder.configure({
+      codec: 'vp09.00.10.08',
+      width,
+      height,
+      bitrate: 500_000,
+      framerate: 30,
+      // Use default BT.709 colorSpace
+    });
+
+    const data = new Uint8Array(width * height * 4);
+    for (let i = 0; i < data.length; i++) data[i] = 128;
+
+    const frame = new VideoFrame(data, {
+      format: 'RGBA',
+      codedWidth: width,
+      codedHeight: height,
+      timestamp: 0,
+    });
+
+    encoder.encode(frame, { keyFrame: true });
+    frame.close();
+    await encoder.flush();
+    encoder.close();
+
+    // Decode WITHOUT specifying colorSpace in config
+    const decodedFrames: VideoFrame[] = [];
+    const decoder = new VideoDecoder({
+      output: (f) => decodedFrames.push(f),
+      error: (err) => { throw err; },
+    });
+
+    decoder.configure({
+      codec: 'vp09.00.10.08',
+      codedWidth: width,
+      codedHeight: height,
+      // No colorSpace specified - should use bitstream colorSpace
+    });
+
+    decoder.decode(encodedChunks[0]);
+    await decoder.flush();
+    decoder.close();
+
+    expect(decodedFrames.length).toBe(1);
+    // Decoded frame should have colorSpace from bitstream
+    // (VP9 typically signals BT.709 for SDR content)
+    expect(decodedFrames[0].colorSpace).toBeDefined();
+
+    decodedFrames[0].close();
+  }, 30000);
+
+  it('should use config colorSpace when provided (overrides bitstream)', async () => {
+    const width = 64;
+    const height = 64;
+    const encodedChunks: EncodedVideoChunk[] = [];
+
+    const encoder = new VideoEncoder({
+      output: (chunk) => encodedChunks.push(chunk),
+      error: (err) => { throw err; },
+    });
+
+    encoder.configure({
+      codec: 'vp09.00.10.08',
+      width,
+      height,
+      bitrate: 500_000,
+      framerate: 30,
+    });
+
+    const data = new Uint8Array(width * height * 4);
+    for (let i = 0; i < data.length; i++) data[i] = 128;
+
+    const frame = new VideoFrame(data, {
+      format: 'RGBA',
+      codedWidth: width,
+      codedHeight: height,
+      timestamp: 0,
+    });
+
+    encoder.encode(frame, { keyFrame: true });
+    frame.close();
+    await encoder.flush();
+    encoder.close();
+
+    // Decode with explicit colorSpace in config
+    const decodedFrames: VideoFrame[] = [];
+    const decoder = new VideoDecoder({
+      output: (f) => decodedFrames.push(f),
+      error: (err) => { throw err; },
+    });
+
+    decoder.configure({
+      codec: 'vp09.00.10.08',
+      codedWidth: width,
+      codedHeight: height,
+      colorSpace: {
+        primaries: 'bt2020',
+        transfer: 'pq',
+        matrix: 'bt2020-ncl',
+        fullRange: false,
+      },
+    });
+
+    decoder.decode(encodedChunks[0]);
+    await decoder.flush();
+    decoder.close();
+
+    expect(decodedFrames.length).toBe(1);
+    // Should use config colorSpace
+    expect(decodedFrames[0].colorSpace.primaries).toBe('bt2020');
+    expect(decodedFrames[0].colorSpace.transfer).toBe('pq');
+
+    decodedFrames[0].close();
+  }, 30000);
+});

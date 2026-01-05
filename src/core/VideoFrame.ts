@@ -5,7 +5,7 @@
 
 import type { BufferSource, DOMRectInit, PlaneLayout, NativeFrame } from '../types/index.js';
 import { DOMException, DOMRectReadOnly, isNativeFrame } from '../types/index.js';
-import { toUint8Array } from '../utils/buffer.js';
+import { toUint8Array, copyToUint8Array } from '../utils/buffer.js';
 import type { VideoColorSpaceInit } from '../formats/index.js';
 import {
   getFrameAllocationSize,
@@ -31,6 +31,185 @@ import type {
 
 // Re-export types for backwards compatibility
 export type { VideoPixelFormat, VideoFrameBufferInit, VideoFrameCopyToOptions, VideoFrameInit };
+
+/** Valid pixel formats per WebCodecs spec */
+const VALID_PIXEL_FORMATS: Set<VideoPixelFormat> = new Set([
+  'I420', 'I420A', 'I422', 'I422A', 'I444', 'I444A', 'NV12',
+  'RGBA', 'RGBX', 'BGRA', 'BGRX',
+  'I420P10', 'I420A10', 'I422P10', 'I422A10', 'I444P10', 'I444A10', 'P010',
+  'I420P12', 'I420A12', 'I422P12', 'I422A12', 'I444P12', 'I444A12',
+]);
+
+/**
+ * Validate that a value is a finite positive number
+ */
+function validateFinitePositive(value: number, name: string): void {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new TypeError(`${name} must be a finite positive number`);
+  }
+}
+
+/**
+ * Validate duration if provided (must be finite non-negative)
+ */
+function validateDuration(duration: number | undefined | null): void {
+  if (duration !== undefined && duration !== null) {
+    if (!Number.isFinite(duration) || duration < 0) {
+      throw new TypeError('duration must be a finite non-negative number');
+    }
+  }
+}
+
+/**
+ * Validate rotation value (must be 0, 90, 180, or 270)
+ */
+function validateRotation(rotation: number | undefined): void {
+  if (rotation !== undefined && rotation !== 0 && rotation !== 90 && rotation !== 180 && rotation !== 270) {
+    throw new TypeError('rotation must be 0, 90, 180, or 270');
+  }
+}
+
+/**
+ * Check if an ArrayBuffer is detached
+ */
+function isDetached(buffer: ArrayBuffer): boolean {
+  return buffer.byteLength === 0 && !(buffer as any)._intentionallyEmpty;
+}
+
+/**
+ * Detach ArrayBuffers after frame construction (transfer ownership).
+ * Per WebCodecs spec, this prevents the source from being used after transfer.
+ */
+function detachArrayBuffers(buffers: ArrayBuffer[] | undefined): void {
+  if (!buffers || buffers.length === 0) return;
+
+  for (const buffer of buffers) {
+    if (!(buffer instanceof ArrayBuffer)) {
+      throw new TypeError('transfer list must only contain ArrayBuffer objects');
+    }
+    // Check if already detached
+    if (isDetached(buffer)) {
+      throw new DOMException('Cannot transfer a detached ArrayBuffer', 'DataCloneError');
+    }
+    // Detach the buffer using structuredClone with transfer (Node.js 17+)
+    // or ArrayBuffer.prototype.transfer (ES2024/Node.js 22+)
+    try {
+      if (typeof (buffer as any).transfer === 'function') {
+        // ES2024 ArrayBuffer.prototype.transfer
+        (buffer as any).transfer();
+      } else if (typeof structuredClone === 'function') {
+        // Use structuredClone with transfer to detach
+        structuredClone(buffer, { transfer: [buffer] });
+      }
+      // If neither method is available, the buffer won't be detached
+      // but we've already copied the data, so this is a graceful degradation
+    } catch {
+      // Ignore errors during detachment - data was already copied
+    }
+  }
+}
+
+/**
+ * Validate that dimensions are valid for the given pixel format's subsampling
+ */
+function validateSubsamplingAlignment(
+  format: VideoPixelFormat,
+  width: number,
+  height: number
+): void {
+  // YUV 4:2:0 formats require even dimensions
+  if (format === 'I420' || format === 'I420A' || format === 'NV12' ||
+      format === 'I420P10' || format === 'I420P12' || format === 'P010') {
+    if (width % 2 !== 0 || height % 2 !== 0) {
+      throw new TypeError(
+        `${format} format requires even dimensions, got ${width}x${height}`
+      );
+    }
+  }
+  // YUV 4:2:2 formats require even width
+  if (format === 'I422' || format === 'I422P10' || format === 'I422P12') {
+    if (width % 2 !== 0) {
+      throw new TypeError(
+        `${format} format requires even width, got ${width}`
+      );
+    }
+  }
+}
+
+/**
+ * Compose two orientations (rotation + flip).
+ * Per WebCodecs spec, when wrapping a VideoFrame with new orientation:
+ * - Rotations add (modulo 360)
+ * - Flips XOR (flip twice cancels out)
+ * - When flip is involved, rotation composition requires special handling
+ */
+function composeOrientations(
+  srcRotation: 0 | 90 | 180 | 270,
+  srcFlip: boolean,
+  initRotation: 0 | 90 | 180 | 270,
+  initFlip: boolean
+): { rotation: 0 | 90 | 180 | 270; flip: boolean } {
+  // If source has no orientation, just use init orientation
+  if (srcRotation === 0 && !srcFlip) {
+    return { rotation: initRotation, flip: initFlip };
+  }
+  // If init has no orientation, just use source orientation
+  if (initRotation === 0 && !initFlip) {
+    return { rotation: srcRotation, flip: srcFlip };
+  }
+
+  let resultRotation: number;
+  let resultFlip: boolean;
+
+  // When source has a flip, the init rotation is applied in mirrored space
+  // which effectively negates the rotation direction
+  if (srcFlip) {
+    // Flip negates rotation direction, so subtract instead of add
+    resultRotation = (srcRotation - initRotation + 360) % 360;
+  } else {
+    // No flip, rotations simply add
+    resultRotation = (srcRotation + initRotation) % 360;
+  }
+
+  // Flips XOR together
+  resultFlip = srcFlip !== initFlip;
+
+  return {
+    rotation: resultRotation as 0 | 90 | 180 | 270,
+    flip: resultFlip,
+  };
+}
+
+/**
+ * Validate visibleRect is within coded bounds
+ */
+function validateVisibleRect(
+  visibleRect: DOMRectInit | undefined,
+  codedWidth: number,
+  codedHeight: number
+): void {
+  if (!visibleRect) return;
+
+  const x = visibleRect.x ?? 0;
+  const y = visibleRect.y ?? 0;
+  const width = visibleRect.width ?? codedWidth;
+  const height = visibleRect.height ?? codedHeight;
+
+  if (!Number.isFinite(x) || !Number.isFinite(y) ||
+      !Number.isFinite(width) || !Number.isFinite(height)) {
+    throw new TypeError('visibleRect values must be finite numbers');
+  }
+
+  if (x < 0 || y < 0 || width <= 0 || height <= 0) {
+    throw new TypeError('visibleRect must have non-negative origin and positive dimensions');
+  }
+
+  if (x + width > codedWidth || y + height > codedHeight) {
+    throw new TypeError(
+      `visibleRect (${x},${y},${width},${height}) exceeds coded dimensions (${codedWidth}x${codedHeight})`
+    );
+  }
+}
 
 /**
  * VideoFrameMetadata interface per W3C WebCodecs spec
@@ -83,10 +262,14 @@ export class VideoFrame {
   get visibleRect(): DOMRectReadOnly | null { return this._closed ? null : this._visibleRect; }
   get displayWidth(): number { return this._closed ? 0 : this._displayWidth; }
   get displayHeight(): number { return this._closed ? 0 : this._displayHeight; }
-  // timestamp and duration are preserved after close per WebCodecs spec
+  // timestamp, duration, colorSpace, rotation, flip are preserved after close per WebCodecs spec
   get duration(): number | null { return this._duration; }
   get timestamp(): number { return this._timestamp; }
-  get colorSpace(): VideoColorSpace | null { return this._closed ? null : this._colorSpace; }
+  get colorSpace(): VideoColorSpace { return this._colorSpace; }
+  /** Frame rotation in degrees (0, 90, 180, 270) - preserved after close */
+  get rotation(): 0 | 90 | 180 | 270 { return this._rotation; }
+  /** Whether frame is flipped horizontally - preserved after close */
+  get flip(): boolean { return this._flip; }
 
   /**
    * Create a VideoFrame from raw pixel data or CanvasImageSource
@@ -151,15 +334,46 @@ export class VideoFrame {
         this._visibleRect = new DOMRectReadOnly(0, 0, sourceFrame.codedWidth, sourceFrame.codedHeight);
       }
 
-      this._displayWidth = frameInit.displayWidth ?? sourceFrame.displayWidth;
-      this._displayHeight = frameInit.displayHeight ?? sourceFrame.displayHeight;
       this._colorSpace = new VideoColorSpace(
         this._getDefaultColorSpace(this._format, frameInit.colorSpace)
       );
-      // Store rotation and flip from init or inherit from source frame metadata
-      const sourceMetadata = (sourceFrame as any).metadata?.() ?? {};
-      this._rotation = frameInit.rotation ?? sourceMetadata.rotation ?? 0;
-      this._flip = frameInit.flip ?? sourceMetadata.flip ?? false;
+
+      // Compose orientations: source orientation + init orientation
+      // Get source orientation from getter (if it's our VideoFrame) or metadata
+      let srcRotation: 0 | 90 | 180 | 270 = 0;
+      let srcFlip = false;
+      if (typeof (sourceFrame as any).rotation === 'number') {
+        srcRotation = (sourceFrame as any).rotation;
+      } else if ((sourceFrame as any).metadata) {
+        const sourceMetadata = (sourceFrame as any).metadata();
+        srcRotation = sourceMetadata?.rotation ?? 0;
+        srcFlip = sourceMetadata?.flip ?? false;
+      }
+      if (typeof (sourceFrame as any).flip === 'boolean') {
+        srcFlip = (sourceFrame as any).flip;
+      }
+
+      const initRotation = frameInit.rotation ?? 0;
+      const initFlip = frameInit.flip ?? false;
+
+      // Compose the orientations per WebCodecs spec
+      const composed = composeOrientations(srcRotation, srcFlip, initRotation, initFlip);
+      this._rotation = composed.rotation;
+      this._flip = composed.flip;
+
+      // Display dimensions: use explicit values if provided, otherwise compute from source
+      // accounting for the composed orientation's effect on dimensions
+      if (frameInit.displayWidth !== undefined && frameInit.displayHeight !== undefined) {
+        this._displayWidth = frameInit.displayWidth;
+        this._displayHeight = frameInit.displayHeight;
+      } else {
+        // Compute default display dimensions based on composed orientation
+        const defaultDisplay = this._computeDefaultDisplayDimensions(
+          this._visibleRect.width, this._visibleRect.height, this._rotation
+        );
+        this._displayWidth = frameInit.displayWidth ?? defaultDisplay.displayWidth;
+        this._displayHeight = frameInit.displayHeight ?? defaultDisplay.displayHeight;
+      }
       return;
     }
 
@@ -175,15 +389,36 @@ export class VideoFrame {
       if (!bufferInit.format) {
         throw new TypeError('format is required');
       }
-      if (typeof bufferInit.codedWidth !== 'number' || bufferInit.codedWidth <= 0) {
-        throw new TypeError('codedWidth must be a positive number');
+      // Validate pixel format is known
+      if (!VALID_PIXEL_FORMATS.has(bufferInit.format)) {
+        throw new TypeError(`Unknown pixel format: ${bufferInit.format}`);
       }
-      if (typeof bufferInit.codedHeight !== 'number' || bufferInit.codedHeight <= 0) {
-        throw new TypeError('codedHeight must be a positive number');
+      if (typeof bufferInit.codedWidth !== 'number') {
+        throw new TypeError('codedWidth is required');
       }
-      if (typeof bufferInit.timestamp !== 'number') {
-        throw new TypeError('timestamp is required');
+      validateFinitePositive(bufferInit.codedWidth, 'codedWidth');
+      if (typeof bufferInit.codedHeight !== 'number') {
+        throw new TypeError('codedHeight is required');
       }
+      validateFinitePositive(bufferInit.codedHeight, 'codedHeight');
+      if (typeof bufferInit.timestamp !== 'number' || !Number.isFinite(bufferInit.timestamp)) {
+        throw new TypeError('timestamp must be a finite number');
+      }
+      // Validate subsampling alignment
+      validateSubsamplingAlignment(bufferInit.format, bufferInit.codedWidth, bufferInit.codedHeight);
+      // Validate visibleRect bounds
+      validateVisibleRect(bufferInit.visibleRect, bufferInit.codedWidth, bufferInit.codedHeight);
+      // Validate displayWidth/displayHeight if provided
+      if (bufferInit.displayWidth !== undefined) {
+        validateFinitePositive(bufferInit.displayWidth, 'displayWidth');
+      }
+      if (bufferInit.displayHeight !== undefined) {
+        validateFinitePositive(bufferInit.displayHeight, 'displayHeight');
+      }
+      // Validate duration if provided
+      validateDuration(bufferInit.duration);
+      // Validate rotation if provided
+      validateRotation(bufferInit.rotation);
 
       this._nativeFrame = dataOrImage as NativeFrame;
       this._nativeCleanup = (init as { _nativeCleanup?: () => void })._nativeCleanup ?? null;
@@ -208,13 +443,18 @@ export class VideoFrame {
         this._visibleRect = new DOMRectReadOnly(0, 0, bufferInit.codedWidth, bufferInit.codedHeight);
       }
 
-      this._displayWidth = bufferInit.displayWidth ?? this._visibleRect.width;
-      this._displayHeight = bufferInit.displayHeight ?? this._visibleRect.height;
+      // Set rotation/flip first as they affect default display dimensions
+      this._rotation = bufferInit.rotation ?? 0;
+      this._flip = bufferInit.flip ?? false;
+      // Compute default display dimensions (swapped for 90/270 rotation)
+      const defaultDisplay = this._computeDefaultDisplayDimensions(
+        this._visibleRect.width, this._visibleRect.height, this._rotation
+      );
+      this._displayWidth = bufferInit.displayWidth ?? defaultDisplay.displayWidth;
+      this._displayHeight = bufferInit.displayHeight ?? defaultDisplay.displayHeight;
       this._colorSpace = new VideoColorSpace(
         this._getDefaultColorSpace(bufferInit.format, bufferInit.colorSpace)
       );
-      this._rotation = bufferInit.rotation ?? 0;
-      this._flip = bufferInit.flip ?? false;
     } else if (dataOrImage instanceof ArrayBuffer || ArrayBuffer.isView(dataOrImage)) {
       const data = dataOrImage as BufferSource;
       const bufferInit = init as VideoFrameBufferInit;
@@ -223,14 +463,46 @@ export class VideoFrame {
       if (!bufferInit.format) {
         throw new TypeError('format is required');
       }
-      if (typeof bufferInit.codedWidth !== 'number' || bufferInit.codedWidth <= 0) {
-        throw new TypeError('codedWidth must be a positive number');
+      // Validate pixel format is known
+      if (!VALID_PIXEL_FORMATS.has(bufferInit.format)) {
+        throw new TypeError(`Unknown pixel format: ${bufferInit.format}`);
       }
-      if (typeof bufferInit.codedHeight !== 'number' || bufferInit.codedHeight <= 0) {
-        throw new TypeError('codedHeight must be a positive number');
+      if (typeof bufferInit.codedWidth !== 'number') {
+        throw new TypeError('codedWidth is required');
       }
-      if (typeof bufferInit.timestamp !== 'number') {
-        throw new TypeError('timestamp is required');
+      validateFinitePositive(bufferInit.codedWidth, 'codedWidth');
+      if (typeof bufferInit.codedHeight !== 'number') {
+        throw new TypeError('codedHeight is required');
+      }
+      validateFinitePositive(bufferInit.codedHeight, 'codedHeight');
+      if (typeof bufferInit.timestamp !== 'number' || !Number.isFinite(bufferInit.timestamp)) {
+        throw new TypeError('timestamp must be a finite number');
+      }
+      // Validate subsampling alignment
+      validateSubsamplingAlignment(bufferInit.format, bufferInit.codedWidth, bufferInit.codedHeight);
+      // Validate visibleRect bounds
+      validateVisibleRect(bufferInit.visibleRect, bufferInit.codedWidth, bufferInit.codedHeight);
+      // Validate displayWidth/displayHeight if provided
+      if (bufferInit.displayWidth !== undefined) {
+        validateFinitePositive(bufferInit.displayWidth, 'displayWidth');
+      }
+      if (bufferInit.displayHeight !== undefined) {
+        validateFinitePositive(bufferInit.displayHeight, 'displayHeight');
+      }
+      // Validate duration if provided
+      validateDuration(bufferInit.duration);
+      // Validate rotation if provided
+      validateRotation(bufferInit.rotation);
+      // Validate transfer list if provided (check for already detached buffers)
+      if (bufferInit.transfer) {
+        for (const buffer of bufferInit.transfer) {
+          if (!(buffer instanceof ArrayBuffer)) {
+            throw new TypeError('transfer list must only contain ArrayBuffer objects');
+          }
+          if (isDetached(buffer)) {
+            throw new DOMException('Cannot transfer a detached ArrayBuffer', 'DataCloneError');
+          }
+        }
       }
 
       // Validate buffer size
@@ -247,7 +519,15 @@ export class VideoFrame {
         );
       }
 
-      this._data = toUint8Array(data);
+      // Copy data to internal buffer (must happen before transfer detaches source)
+      // Use copyToUint8Array when transfer is specified to ensure we don't hold a view
+      // to a buffer that will be detached
+      this._data = bufferInit.transfer && bufferInit.transfer.length > 0
+        ? copyToUint8Array(data)
+        : toUint8Array(data);
+
+      // Detach transferred buffers after data has been copied
+      detachArrayBuffers(bufferInit.transfer);
 
       this._format = bufferInit.format;
       this._codedWidth = bufferInit.codedWidth;
@@ -268,15 +548,20 @@ export class VideoFrame {
         this._visibleRect = new DOMRectReadOnly(0, 0, bufferInit.codedWidth, bufferInit.codedHeight);
       }
 
-      this._displayWidth = bufferInit.displayWidth ?? this._visibleRect.width;
-      this._displayHeight = bufferInit.displayHeight ?? this._visibleRect.height;
+      // Set rotation/flip first as they affect default display dimensions
+      this._rotation = bufferInit.rotation ?? 0;
+      this._flip = bufferInit.flip ?? false;
+      // Compute default display dimensions (swapped for 90/270 rotation)
+      const defaultDisplay = this._computeDefaultDisplayDimensions(
+        this._visibleRect.width, this._visibleRect.height, this._rotation
+      );
+      this._displayWidth = bufferInit.displayWidth ?? defaultDisplay.displayWidth;
+      this._displayHeight = bufferInit.displayHeight ?? defaultDisplay.displayHeight;
       this._colorSpace = new VideoColorSpace(
         this._getDefaultColorSpace(bufferInit.format, bufferInit.colorSpace)
       );
       // Store input layout if provided (for non-standard memory layouts)
       this._inputLayout = bufferInit.layout ?? null;
-      this._rotation = bufferInit.rotation ?? 0;
-      this._flip = bufferInit.flip ?? false;
     } else if (isCanvasImageSource(dataOrImage)) {
       const frameInit = init as VideoFrameInit;
 
@@ -286,6 +571,24 @@ export class VideoFrame {
       }
 
       const result = this._extractFromCanvasImageSource(dataOrImage, frameInit);
+
+      // Validate canvas isn't empty
+      if (result.width <= 0 || result.height <= 0) {
+        throw new DOMException('CanvasImageSource has zero dimensions', 'InvalidStateError');
+      }
+      // Validate visibleRect bounds
+      validateVisibleRect(frameInit.visibleRect, result.width, result.height);
+      // Validate displayWidth/displayHeight if provided
+      if (frameInit.displayWidth !== undefined) {
+        validateFinitePositive(frameInit.displayWidth, 'displayWidth');
+      }
+      if (frameInit.displayHeight !== undefined) {
+        validateFinitePositive(frameInit.displayHeight, 'displayHeight');
+      }
+      // Validate duration if provided
+      validateDuration(frameInit.duration);
+      // Validate rotation if provided
+      validateRotation(frameInit.rotation);
 
       this._data = result.data;
       this._format = result.format;
@@ -307,16 +610,36 @@ export class VideoFrame {
         this._visibleRect = new DOMRectReadOnly(0, 0, result.width, result.height);
       }
 
-      this._displayWidth = frameInit.displayWidth ?? this._visibleRect.width;
-      this._displayHeight = frameInit.displayHeight ?? this._visibleRect.height;
+      // Set rotation/flip first as they affect default display dimensions
+      this._rotation = frameInit.rotation ?? 0;
+      this._flip = frameInit.flip ?? false;
+      // Compute default display dimensions (swapped for 90/270 rotation)
+      const defaultDisplay = this._computeDefaultDisplayDimensions(
+        this._visibleRect.width, this._visibleRect.height, this._rotation
+      );
+      this._displayWidth = frameInit.displayWidth ?? defaultDisplay.displayWidth;
+      this._displayHeight = frameInit.displayHeight ?? defaultDisplay.displayHeight;
       this._colorSpace = new VideoColorSpace(
         this._getDefaultColorSpace(result.format, frameInit.colorSpace)
       );
-      this._rotation = frameInit.rotation ?? 0;
-      this._flip = frameInit.flip ?? false;
     } else {
       throw new TypeError('data must be an ArrayBuffer, ArrayBufferView, or CanvasImageSource');
     }
+  }
+
+  /**
+   * Compute default display dimensions based on visible rect and rotation.
+   * Per WebCodecs spec, for 90/270 rotation, display dimensions are swapped.
+   */
+  private _computeDefaultDisplayDimensions(
+    visibleWidth: number,
+    visibleHeight: number,
+    rotation: 0 | 90 | 180 | 270
+  ): { displayWidth: number; displayHeight: number } {
+    if (rotation === 90 || rotation === 270) {
+      return { displayWidth: visibleHeight, displayHeight: visibleWidth };
+    }
+    return { displayWidth: visibleWidth, displayHeight: visibleHeight };
   }
 
   /**
@@ -547,13 +870,22 @@ export class VideoFrame {
       return this._getPlaneLayoutForSize(srcW, srcH, destFormat);
     }
 
+    // Get colorSpace for conversion (use options if provided, otherwise use frame's colorSpace)
+    // Convert null values to undefined for proper VideoColorSpaceInit compatibility
+    const colorSpace: VideoColorSpaceInit | undefined = options?.colorSpace ?? {
+      primaries: this._colorSpace.primaries as VideoColorSpaceInit['primaries'],
+      transfer: this._colorSpace.transfer as VideoColorSpaceInit['transfer'],
+      matrix: this._colorSpace.matrix as VideoColorSpaceInit['matrix'],
+      fullRange: this._colorSpace.fullRange ?? undefined,
+    };
+
     // Copy with optional layout
     if (layout) {
-      this._copyWithLayout(destArray, destFormat, srcX, srcY, srcW, srcH, layout);
+      this._copyWithLayout(destArray, destFormat, srcX, srcY, srcW, srcH, layout, colorSpace);
       return layout;
     }
 
-    this._copyWithConversion(destArray, destFormat, srcX, srcY, srcW, srcH);
+    this._copyWithConversion(destArray, destFormat, srcX, srcY, srcW, srcH, colorSpace);
     return this._getPlaneLayoutForSize(srcW, srcH, destFormat);
   }
 
@@ -567,7 +899,8 @@ export class VideoFrame {
     srcY: number,
     srcW: number,
     srcH: number,
-    layout: PlaneLayout[]
+    layout: PlaneLayout[],
+    colorSpace?: VideoColorSpaceInit
   ): void {
     // First, convert to a temporary buffer if format conversion needed
     let srcData: Uint8Array;
@@ -577,7 +910,7 @@ export class VideoFrame {
       // Convert to temp buffer with packed layout, then copy to dest with custom layout
       const tempSize = getFrameAllocationSize(destFormat, srcW, srcH);
       const tempBuffer = new Uint8Array(tempSize);
-      this._copyWithConversion(tempBuffer, destFormat, srcX, srcY, srcW, srcH);
+      this._copyWithConversion(tempBuffer, destFormat, srcX, srcY, srcW, srcH, colorSpace);
       srcData = tempBuffer;
       // Reset srcX/srcY since tempBuffer already has the clipped region
       srcX = 0;
@@ -610,7 +943,8 @@ export class VideoFrame {
     srcX: number,
     srcY: number,
     srcW: number,
-    srcH: number
+    srcH: number,
+    colorSpace?: VideoColorSpaceInit
   ): void {
     if (this._format === destFormat) {
       this._copyDirectWithClipping(dest, srcX, srcY, srcW, srcH);
@@ -625,7 +959,7 @@ export class VideoFrame {
       height: this._codedHeight,
     };
 
-    convertFrameFormat(src, dest, destFormat, srcX, srcY, srcW, srcH);
+    convertFrameFormat(src, dest, destFormat, srcX, srcY, srcW, srcH, colorSpace);
   }
 
   private _copyDirectWithClipping(
@@ -780,6 +1114,8 @@ export class VideoFrame {
       displayHeight: this._displayHeight,
       visibleRect: this._visibleRect.toJSON(),
       colorSpace,
+      rotation: this._rotation,
+      flip: this._flip,
     });
   }
 

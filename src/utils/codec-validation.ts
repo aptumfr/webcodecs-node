@@ -258,6 +258,34 @@ export function validateVideoDecoderConfig(config: unknown): void {
   if (typeof cfg.codec !== 'string' || cfg.codec === '') {
     throw new TypeError('codec must be a non-empty string');
   }
+
+  // Validate codedWidth if provided
+  if (cfg.codedWidth !== undefined) {
+    if (typeof cfg.codedWidth !== 'number' || !Number.isFinite(cfg.codedWidth) || cfg.codedWidth <= 0 || !Number.isInteger(cfg.codedWidth)) {
+      throw new TypeError('codedWidth must be a positive integer');
+    }
+  }
+
+  // Validate codedHeight if provided
+  if (cfg.codedHeight !== undefined) {
+    if (typeof cfg.codedHeight !== 'number' || !Number.isFinite(cfg.codedHeight) || cfg.codedHeight <= 0 || !Number.isInteger(cfg.codedHeight)) {
+      throw new TypeError('codedHeight must be a positive integer');
+    }
+  }
+
+  // Validate displayAspectWidth if provided
+  if (cfg.displayAspectWidth !== undefined) {
+    if (typeof cfg.displayAspectWidth !== 'number' || !Number.isFinite(cfg.displayAspectWidth) || cfg.displayAspectWidth <= 0 || !Number.isInteger(cfg.displayAspectWidth)) {
+      throw new TypeError('displayAspectWidth must be a positive integer');
+    }
+  }
+
+  // Validate displayAspectHeight if provided
+  if (cfg.displayAspectHeight !== undefined) {
+    if (typeof cfg.displayAspectHeight !== 'number' || !Number.isFinite(cfg.displayAspectHeight) || cfg.displayAspectHeight <= 0 || !Number.isInteger(cfg.displayAspectHeight)) {
+      throw new TypeError('displayAspectHeight must be a positive integer');
+    }
+  }
 }
 
 /**

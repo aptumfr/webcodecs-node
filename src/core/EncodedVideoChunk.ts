@@ -4,7 +4,8 @@
  */
 
 import type { BufferSource } from '../types/index.js';
-import { toUint8Array } from '../utils/buffer.js';
+import { toUint8Array, copyToUint8Array } from '../utils/buffer.js';
+import { DOMException } from '../types/index.js';
 
 export type EncodedVideoChunkType = 'key' | 'delta';
 
@@ -13,6 +14,40 @@ export interface EncodedVideoChunkInit {
   timestamp: number;
   duration?: number;
   data: BufferSource;
+  /** ArrayBuffers to detach after chunk construction (transfer ownership) */
+  transfer?: ArrayBuffer[];
+}
+
+/**
+ * Check if an ArrayBuffer is detached
+ */
+function isDetached(buffer: ArrayBuffer): boolean {
+  return buffer.byteLength === 0;
+}
+
+/**
+ * Detach ArrayBuffers after construction
+ */
+function detachArrayBuffers(buffers: ArrayBuffer[] | undefined): void {
+  if (!buffers || buffers.length === 0) return;
+
+  for (const buffer of buffers) {
+    if (!(buffer instanceof ArrayBuffer)) {
+      throw new TypeError('transfer list must only contain ArrayBuffer objects');
+    }
+    if (isDetached(buffer)) {
+      throw new DOMException('Cannot transfer a detached ArrayBuffer', 'DataCloneError');
+    }
+    try {
+      if (typeof (buffer as any).transfer === 'function') {
+        (buffer as any).transfer();
+      } else if (typeof structuredClone === 'function') {
+        structuredClone(buffer, { transfer: [buffer] });
+      }
+    } catch {
+      // Ignore errors during detachment
+    }
+  }
 }
 
 export class EncodedVideoChunk {
@@ -45,7 +80,30 @@ export class EncodedVideoChunk {
     this.timestamp = init.timestamp;
     this.duration = init.duration ?? null;
 
-    this._data = toUint8Array(init.data);
+    // Validate transfer list if provided
+    if (init.transfer) {
+      const seen = new Set<ArrayBuffer>();
+      for (const buffer of init.transfer) {
+        if (!(buffer instanceof ArrayBuffer)) {
+          throw new TypeError('transfer list must only contain ArrayBuffer objects');
+        }
+        if (seen.has(buffer)) {
+          throw new DOMException('Duplicate ArrayBuffer in transfer list', 'DataCloneError');
+        }
+        if (isDetached(buffer)) {
+          throw new DOMException('Cannot transfer a detached ArrayBuffer', 'DataCloneError');
+        }
+        seen.add(buffer);
+      }
+    }
+
+    // Copy data (use copyToUint8Array when transfer is specified to avoid view issues)
+    this._data = init.transfer && init.transfer.length > 0
+      ? copyToUint8Array(init.data)
+      : toUint8Array(init.data);
+
+    // Detach transferred buffers after data has been copied
+    detachArrayBuffers(init.transfer);
 
     this.byteLength = this._data.byteLength;
   }

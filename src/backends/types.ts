@@ -46,6 +46,10 @@ export interface VideoEncoderBackendConfig {
   codec: string;
   width: number;
   height: number;
+  /** Input frame width - if different from width, rescaling will be applied */
+  inputWidth?: number;
+  /** Input frame height - if different from height, rescaling will be applied */
+  inputHeight?: number;
   inputPixelFormat?: string;
   framerate?: number;
   bitrate?: number;

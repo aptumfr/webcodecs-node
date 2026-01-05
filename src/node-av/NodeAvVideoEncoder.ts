@@ -152,6 +152,7 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
   private isHevcCodec = false;
   private isAvcCodec = false;
   private needsFormatConversion = false;
+  private needsRescaling = false;
   private outputFormat: 'annexb' | 'mp4' = 'mp4'; // Default to MP4/AVCC format
 
   get isHealthy(): boolean {
@@ -364,7 +365,13 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     // Check if format conversion is needed
     this.needsFormatConversion = this.inputPixelFormat !== this.encoderPixelFormat;
 
-    if (this.needsFormatConversion) {
+    // Check if rescaling is needed (input dimensions differ from output dimensions)
+    const inputWidth = this.config!.inputWidth ?? this.config!.width;
+    const inputHeight = this.config!.inputHeight ?? this.config!.height;
+    this.needsRescaling = inputWidth !== this.config!.width || inputHeight !== this.config!.height;
+
+    // Build filter chain if format conversion or rescaling is needed
+    if (this.needsFormatConversion || this.needsRescaling) {
       let targetFormat: string;
       if (this.encoderPixelFormat === AV_PIX_FMT_NV12) {
         targetFormat = 'nv12';
@@ -378,17 +385,28 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
         targetFormat = 'yuv420p';
       }
 
+      // Build filter string with optional scale and format conversion
+      const filterParts: string[] = [];
+      if (this.needsRescaling) {
+        // Use lanczos scaling for high quality
+        filterParts.push(`scale=${this.config!.width}:${this.config!.height}:flags=lanczos`);
+        logger.debug(`Rescaling: ${inputWidth}x${inputHeight} → ${this.config!.width}x${this.config!.height}`);
+      }
+      if (this.needsFormatConversion) {
+        filterParts.push(`format=${targetFormat}`);
+      }
+
       // Try GPU-accelerated filter if hardware context is available
       if (this.hardware) {
         const hwType = this.hardware.deviceTypeName;
-        const gpuFilter = this.buildGpuFilterChain(hwType, targetFormat);
+        const gpuFilter = this.buildGpuFilterChain(hwType, targetFormat, inputWidth, inputHeight);
 
         if (gpuFilter) {
           try {
             this.filter = FilterAPI.create(gpuFilter, {
               hardware: this.hardware,
             } as any);
-            logger.debug(`Created GPU format conversion filter (${hwType}): ${gpuFilter}`);
+            logger.debug(`Created GPU filter chain (${hwType}): ${gpuFilter}`);
             return;
           } catch (err) {
             logger.debug(`GPU filter failed, falling back to CPU: ${(err as Error).message}`);
@@ -396,27 +414,39 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
         }
       }
 
-      // Fallback: CPU SIMD conversion via libswscale
-      this.filter = FilterAPI.create(`format=${targetFormat}`);
-      logger.debug(`Created CPU format conversion filter: ${pixelFormatName(this.inputPixelFormat)} → ${targetFormat}`);
+      // Fallback: CPU filter chain via libswscale
+      const filterChain = filterParts.join(',');
+      this.filter = FilterAPI.create(filterChain);
+      logger.debug(`Created CPU filter chain: ${filterChain}`);
     }
   }
 
   /**
-   * Build GPU-accelerated filter chain for format conversion
+   * Build GPU-accelerated filter chain for format conversion and optional rescaling
    * Returns null if no GPU filter is available for this hardware type
    */
-  private buildGpuFilterChain(hwType: string, targetFormat: string): string | null {
-    // GPU filter chains: upload to GPU → convert on GPU → keep on GPU for encoder
+  private buildGpuFilterChain(
+    hwType: string,
+    targetFormat: string,
+    inputWidth?: number,
+    inputHeight?: number
+  ): string | null {
+    const outputWidth = this.config!.width;
+    const outputHeight = this.config!.height;
+    const needsScale = inputWidth !== undefined && inputHeight !== undefined &&
+      (inputWidth !== outputWidth || inputHeight !== outputHeight);
+    const scaleParams = needsScale ? `w=${outputWidth}:h=${outputHeight}:` : '';
+
+    // GPU filter chains: upload to GPU → scale on GPU (if needed) → convert format → keep on GPU for encoder
     switch (hwType) {
       case 'vaapi':
-        return `format=nv12,hwupload,scale_vaapi=format=${targetFormat}`;
+        return `format=nv12,hwupload,scale_vaapi=${scaleParams}format=${targetFormat}`;
       case 'cuda':
-        return `format=nv12,hwupload_cuda,scale_cuda=format=${targetFormat}`;
+        return `format=nv12,hwupload_cuda,scale_cuda=${scaleParams}format=${targetFormat}`;
       case 'qsv':
-        return `format=nv12,hwupload=extra_hw_frames=64,scale_qsv=format=${targetFormat}`;
+        return `format=nv12,hwupload=extra_hw_frames=64,scale_qsv=${scaleParams}format=${targetFormat}`;
       case 'videotoolbox':
-        return `format=nv12,hwupload,scale_vt=format=${targetFormat}`;
+        return `format=nv12,hwupload,scale_vt=${scaleParams}format=${targetFormat}`;
       default:
         return null;
     }
@@ -661,18 +691,21 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
   }
 
   private async createFrame(source: Buffer | Frame, ownInput: boolean): Promise<Frame> {
-    const { width, height } = this.config!;
+    // Use input dimensions for buffer frames (they may differ from output dimensions)
+    const inputWidth = this.config!.inputWidth ?? this.config!.width;
+    const inputHeight = this.config!.inputHeight ?? this.config!.height;
 
     const inputFrame = source instanceof Frame
       ? source
       : Frame.fromVideoBuffer(source, {
-        width,
-        height,
+        width: inputWidth,
+        height: inputHeight,
         format: this.inputPixelFormat,
         timeBase: this.timeBase,
       });
 
-    if (!this.needsFormatConversion || !this.filter) {
+    // Use filter for format conversion and/or rescaling
+    if ((!this.needsFormatConversion && !this.needsRescaling) || !this.filter) {
       return inputFrame;
     }
 
@@ -695,18 +728,26 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
         inputFrame.unref();
       }
 
-      // Close failed filter and create CPU fallback
+      // Close failed filter and create CPU fallback with scale and/or format conversion
       this.filter.close();
       const targetFormat = this.encoderPixelFormat === AV_PIX_FMT_NV12 ? 'nv12' :
                           this.encoderPixelFormat === AV_PIX_FMT_YUVA420P ? 'yuva420p' : 'yuv420p';
-      this.filter = FilterAPI.create(`format=${targetFormat}`);
-      logger.debug(`Created CPU fallback filter: format=${targetFormat}`);
+      const filterParts: string[] = [];
+      if (this.needsRescaling) {
+        filterParts.push(`scale=${this.config!.width}:${this.config!.height}:flags=lanczos`);
+      }
+      if (this.needsFormatConversion) {
+        filterParts.push(`format=${targetFormat}`);
+      }
+      const fallbackChain = filterParts.join(',');
+      this.filter = FilterAPI.create(fallbackChain);
+      logger.debug(`Created CPU fallback filter: ${fallbackChain}`);
 
       const retryFrame = source instanceof Frame
         ? source
         : Frame.fromVideoBuffer(source, {
-          width,
-          height,
+          width: inputWidth,
+          height: inputHeight,
           format: this.inputPixelFormat,
           timeBase: this.timeBase,
         });
@@ -718,7 +759,7 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
 
       const convertedFrame = await this.filter.receive();
       if (!convertedFrame) {
-        throw new Error('CPU format conversion failed: no output from filter');
+        throw new Error('CPU filter processing failed: no output from filter');
       }
 
       return convertedFrame;

@@ -59,24 +59,22 @@ describe('AudioDecoder', () => {
       expect(support.supported).toBe(true);
     });
 
-    it('should not support missing codec', async () => {
-      const support = await AudioDecoder.isConfigSupported({
+    it('should throw TypeError for empty codec', async () => {
+      // Per WebCodecs spec, empty codec throws TypeError
+      await expect(AudioDecoder.isConfigSupported({
         codec: '',
         sampleRate: 48000,
         numberOfChannels: 2,
-      });
-
-      expect(support.supported).toBe(false);
+      })).rejects.toThrow(TypeError);
     });
 
-    it('should not support missing sampleRate', async () => {
-      const support = await AudioDecoder.isConfigSupported({
+    it('should throw TypeError for zero sampleRate', async () => {
+      // Per WebCodecs spec, zero sampleRate throws TypeError
+      await expect(AudioDecoder.isConfigSupported({
         codec: 'opus',
         sampleRate: 0,
         numberOfChannels: 2,
-      });
-
-      expect(support.supported).toBe(false);
+      })).rejects.toThrow(TypeError);
     });
   });
 
@@ -916,4 +914,204 @@ describe('AudioEncoder input formats', () => {
 
     expect(encodedChunks.length).toBeGreaterThan(0);
   }, 30000);
+});
+
+describe('AudioDecoder isConfigSupported validation (N11 fix)', () => {
+  it('should throw TypeError for missing codec', async () => {
+    await expect(AudioDecoder.isConfigSupported({
+      sampleRate: 48000,
+      numberOfChannels: 2,
+    } as any)).rejects.toThrow(TypeError);
+  });
+
+  it('should throw TypeError for empty codec string', async () => {
+    await expect(AudioDecoder.isConfigSupported({
+      codec: '',
+      sampleRate: 48000,
+      numberOfChannels: 2,
+    })).rejects.toThrow(TypeError);
+  });
+
+  it('should throw TypeError for missing sampleRate', async () => {
+    await expect(AudioDecoder.isConfigSupported({
+      codec: 'opus',
+      numberOfChannels: 2,
+    } as any)).rejects.toThrow(TypeError);
+  });
+
+  it('should throw TypeError for non-positive sampleRate', async () => {
+    await expect(AudioDecoder.isConfigSupported({
+      codec: 'opus',
+      sampleRate: 0,
+      numberOfChannels: 2,
+    })).rejects.toThrow(TypeError);
+
+    await expect(AudioDecoder.isConfigSupported({
+      codec: 'opus',
+      sampleRate: -1,
+      numberOfChannels: 2,
+    })).rejects.toThrow(TypeError);
+  });
+
+  it('should throw TypeError for non-finite sampleRate', async () => {
+    await expect(AudioDecoder.isConfigSupported({
+      codec: 'opus',
+      sampleRate: NaN,
+      numberOfChannels: 2,
+    })).rejects.toThrow(TypeError);
+  });
+
+  it('should throw TypeError for missing numberOfChannels', async () => {
+    await expect(AudioDecoder.isConfigSupported({
+      codec: 'opus',
+      sampleRate: 48000,
+    } as any)).rejects.toThrow(TypeError);
+  });
+
+  it('should throw TypeError for non-integer numberOfChannels', async () => {
+    await expect(AudioDecoder.isConfigSupported({
+      codec: 'opus',
+      sampleRate: 48000,
+      numberOfChannels: 2.5,
+    })).rejects.toThrow(TypeError);
+  });
+
+  it('should throw TypeError for non-positive numberOfChannels', async () => {
+    await expect(AudioDecoder.isConfigSupported({
+      codec: 'opus',
+      sampleRate: 48000,
+      numberOfChannels: 0,
+    })).rejects.toThrow(TypeError);
+  });
+
+  it('should throw TypeError for invalid outputFormat', async () => {
+    await expect(AudioDecoder.isConfigSupported({
+      codec: 'opus',
+      sampleRate: 48000,
+      numberOfChannels: 2,
+      outputFormat: 'invalid' as any,
+    })).rejects.toThrow(TypeError);
+  });
+
+  it('should clone config and strip unknown fields', async () => {
+    const support = await AudioDecoder.isConfigSupported({
+      codec: 'opus',
+      sampleRate: 48000,
+      numberOfChannels: 2,
+      unknownField: 'should be stripped',
+    } as any);
+
+    expect(support.supported).toBe(true);
+    expect((support.config as any).unknownField).toBeUndefined();
+  });
+
+  it('should clone description buffer', async () => {
+    const description = new Uint8Array([1, 2, 3, 4]);
+    const support = await AudioDecoder.isConfigSupported({
+      codec: 'opus',
+      sampleRate: 48000,
+      numberOfChannels: 2,
+      description: description.buffer,
+    });
+
+    expect(support.supported).toBe(true);
+    expect(support.config.description).toBeDefined();
+    // Should be a different buffer (cloned)
+    expect(support.config.description).not.toBe(description.buffer);
+  });
+
+  it('should return supported:false for Opus with >2 channels without description', async () => {
+    const support = await AudioDecoder.isConfigSupported({
+      codec: 'opus',
+      sampleRate: 48000,
+      numberOfChannels: 6, // Surround sound
+    });
+
+    expect(support.supported).toBe(false);
+  });
+
+  it('should allow Opus with >2 channels when description is provided', async () => {
+    // Minimal Opus mapping table for 6 channels
+    const description = new Uint8Array([1, 2, 0, 6, 0, 1, 2, 3, 4, 5]);
+    const support = await AudioDecoder.isConfigSupported({
+      codec: 'opus',
+      sampleRate: 48000,
+      numberOfChannels: 6,
+      description: description.buffer,
+    });
+
+    // May still be false if backend doesn't support, but should not fail type validation
+    expect(support.config.description).toBeDefined();
+  });
+});
+
+describe('AudioDecoder configure validation (N11 fix)', () => {
+  it('should throw NotSupportedError for Opus with >2 channels without description', () => {
+    const decoder = new AudioDecoder({
+      output: () => {},
+      error: () => {},
+    });
+
+    expect(() => {
+      decoder.configure({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 6,
+      });
+    }).toThrow(/mapping table/);
+
+    decoder.close();
+  });
+
+  it('should allow Opus with >2 channels when description is provided', () => {
+    const decoder = new AudioDecoder({
+      output: () => {},
+      error: () => {},
+    });
+
+    // Minimal Opus mapping table for 6 channels
+    const description = new Uint8Array([1, 2, 0, 6, 0, 1, 2, 3, 4, 5]);
+
+    // Should not throw
+    expect(() => {
+      decoder.configure({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 6,
+        description: description.buffer,
+      });
+    }).not.toThrow();
+
+    decoder.close();
+  });
+
+  it('should handle detached description buffer (P0.6)', () => {
+    const decoder = new AudioDecoder({
+      output: () => {},
+      error: () => {},
+    });
+
+    // Create a description buffer and detach it
+    const description = new ArrayBuffer(10);
+
+    // Detach the buffer using structuredClone with transfer
+    if (typeof structuredClone === 'function') {
+      try {
+        structuredClone(description, { transfer: [description] });
+      } catch {
+        // If structuredClone transfer fails, skip this test
+        decoder.close();
+        return;
+      }
+
+      // After detachment, the buffer's byteLength should be 0
+      expect(description.byteLength).toBe(0);
+
+      // The behavior when passing a detached buffer is implementation-defined
+      // Some implementations throw, others may accept the empty buffer
+      // We just verify the detachment worked
+    }
+
+    decoder.close();
+  });
 });

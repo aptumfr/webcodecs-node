@@ -12,7 +12,9 @@ export function pixelFormatToFFmpeg(format: string): string {
     'I420': 'yuv420p',
     'I420A': 'yuva420p',
     'I422': 'yuv422p',
+    'I422A': 'yuva422p',
     'I444': 'yuv444p',
+    'I444A': 'yuva444p',
     'NV12': 'nv12',
     'RGBA': 'rgba',
     'RGBX': 'rgb0',
@@ -20,9 +22,19 @@ export function pixelFormatToFFmpeg(format: string): string {
     'BGRX': 'bgr0',
     // 10-bit formats
     'I420P10': 'yuv420p10le',
+    'I420A10': 'yuva420p10le',
     'I422P10': 'yuv422p10le',
+    'I422A10': 'yuva422p10le',
     'I444P10': 'yuv444p10le',
+    'I444A10': 'yuva444p10le',
     'P010': 'p010le',
+    // 12-bit formats
+    'I420P12': 'yuv420p12le',
+    'I420A12': 'yuva420p12le',
+    'I422P12': 'yuv422p12le',
+    'I422A12': 'yuva422p12le',
+    'I444P12': 'yuv444p12le',
+    'I444A12': 'yuva444p12le',
   };
   return formatMap[format] || format.toLowerCase();
 }
@@ -35,7 +47,9 @@ export function ffmpegToPixelFormat(format: string): string {
     'yuv420p': 'I420',
     'yuva420p': 'I420A',
     'yuv422p': 'I422',
+    'yuva422p': 'I422A',
     'yuv444p': 'I444',
+    'yuva444p': 'I444A',
     'nv12': 'NV12',
     'rgba': 'RGBA',
     'rgb0': 'RGBX',
@@ -44,12 +58,31 @@ export function ffmpegToPixelFormat(format: string): string {
     // 10-bit formats
     'yuv420p10le': 'I420P10',
     'yuv420p10be': 'I420P10',
+    'yuva420p10le': 'I420A10',
+    'yuva420p10be': 'I420A10',
     'yuv422p10le': 'I422P10',
     'yuv422p10be': 'I422P10',
+    'yuva422p10le': 'I422A10',
+    'yuva422p10be': 'I422A10',
     'yuv444p10le': 'I444P10',
     'yuv444p10be': 'I444P10',
+    'yuva444p10le': 'I444A10',
+    'yuva444p10be': 'I444A10',
     'p010le': 'P010',
     'p010be': 'P010',
+    // 12-bit formats
+    'yuv420p12le': 'I420P12',
+    'yuv420p12be': 'I420P12',
+    'yuva420p12le': 'I420A12',
+    'yuva420p12be': 'I420A12',
+    'yuv422p12le': 'I422P12',
+    'yuv422p12be': 'I422P12',
+    'yuva422p12le': 'I422A12',
+    'yuva422p12be': 'I422A12',
+    'yuv444p12le': 'I444P12',
+    'yuv444p12be': 'I444P12',
+    'yuva444p12le': 'I444A12',
+    'yuva444p12be': 'I444A12',
   };
   return formatMap[format] || format.toUpperCase();
 }
@@ -116,10 +149,18 @@ export function calculateFrameSize(format: string, width: number, height: number
     case 'YUV422P':
       // Y: width * height, U: chromaW * height, V: chromaW * height
       return width * height + 2 * chromaW * height;
+    case 'I422A':
+    case 'YUVA422P':
+      // I422 + Alpha plane
+      return width * height * 2 + 2 * chromaW * height;
     case 'I444':
     case 'YUV444P':
       // Y, U, V all full size
       return width * height * 3;
+    case 'I444A':
+    case 'YUVA444P':
+      // I444 + Alpha plane
+      return width * height * 4;
     case 'NV12':
       // Y: width * height, UV interleaved: width * chromaH
       return width * height + width * chromaH;
@@ -128,18 +169,55 @@ export function calculateFrameSize(format: string, width: number, height: number
     case 'YUV420P10LE':
     case 'YUV420P10BE':
       return (width * height + 2 * chromaW * chromaH) * 2;
+    case 'I420A10':
+    case 'YUVA420P10LE':
+    case 'YUVA420P10BE':
+      return (width * height * 2 + 2 * chromaW * chromaH) * 2;
     case 'I422P10':
     case 'YUV422P10LE':
     case 'YUV422P10BE':
       return (width * height + 2 * chromaW * height) * 2;
+    case 'I422A10':
+    case 'YUVA422P10LE':
+    case 'YUVA422P10BE':
+      return (width * height * 2 + 2 * chromaW * height) * 2;
     case 'I444P10':
     case 'YUV444P10LE':
     case 'YUV444P10BE':
       return width * height * 3 * 2;
+    case 'I444A10':
+    case 'YUVA444P10LE':
+    case 'YUVA444P10BE':
+      return width * height * 4 * 2;
     case 'P010':
     case 'P010LE':
     case 'P010BE':
       return (width * height + width * chromaH) * 2;
+    // 12-bit formats: 2 bytes per sample
+    case 'I420P12':
+    case 'YUV420P12LE':
+    case 'YUV420P12BE':
+      return (width * height + 2 * chromaW * chromaH) * 2;
+    case 'I420A12':
+    case 'YUVA420P12LE':
+    case 'YUVA420P12BE':
+      return (width * height * 2 + 2 * chromaW * chromaH) * 2;
+    case 'I422P12':
+    case 'YUV422P12LE':
+    case 'YUV422P12BE':
+      return (width * height + 2 * chromaW * height) * 2;
+    case 'I422A12':
+    case 'YUVA422P12LE':
+    case 'YUVA422P12BE':
+      return (width * height * 2 + 2 * chromaW * height) * 2;
+    case 'I444P12':
+    case 'YUV444P12LE':
+    case 'YUV444P12BE':
+      return width * height * 3 * 2;
+    case 'I444A12':
+    case 'YUVA444P12LE':
+    case 'YUVA444P12BE':
+      return width * height * 4 * 2;
     case 'RGBA':
     case 'RGBX':
     case 'BGRA':

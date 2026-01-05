@@ -26,9 +26,11 @@ import { encodingError, wrapAsWebCodecsError } from '../utils/errors.js';
 import { validateVideoDecoderConfig, validateVideoCodec } from '../utils/codec-validation.js';
 
 const SUPPORTED_OUTPUT_FORMATS: VideoPixelFormat[] = [
-  'I420', 'I420A', 'I422', 'I444', 'NV12', 'RGBA', 'RGBX', 'BGRA', 'BGRX',
+  'I420', 'I420A', 'I422', 'I422A', 'I444', 'I444A', 'NV12', 'RGBA', 'RGBX', 'BGRA', 'BGRX',
   // 10-bit formats
-  'I420P10', 'I422P10', 'I444P10', 'P010'
+  'I420P10', 'I420A10', 'I422P10', 'I422A10', 'I444P10', 'I444A10', 'P010',
+  // 12-bit formats
+  'I420P12', 'I420A12', 'I422P12', 'I422A12', 'I444P12', 'I444A12'
 ];
 
 export type CodecState = 'unconfigured' | 'configured' | 'closed';
@@ -44,6 +46,10 @@ export interface VideoDecoderConfig {
   hardwareAcceleration?: 'no-preference' | 'prefer-hardware' | 'prefer-software';
   optimizeForLatency?: boolean;
   outputFormat?: VideoPixelFormat;
+  /** Frame rotation in degrees (0, 90, 180, 270) - applied to decoded frames */
+  rotation?: 0 | 90 | 180 | 270;
+  /** Whether to flip the frame horizontally - applied to decoded frames */
+  flip?: boolean;
   /**
    * Maximum number of chunks that can be queued before decode() throws.
    * If not specified and dimensions are provided, automatically calculated based on resolution:
@@ -193,21 +199,8 @@ export class VideoDecoder extends WebCodecsEventTarget {
       return { supported: false, config: clonedConfig };
     }
 
-    // Validate displayAspectWidth/Height are positive integers if present
-    if (config.displayAspectWidth !== undefined) {
-      if (typeof config.displayAspectWidth !== 'number' ||
-          config.displayAspectWidth <= 0 ||
-          !Number.isInteger(config.displayAspectWidth)) {
-        return { supported: false, config: clonedConfig };
-      }
-    }
-    if (config.displayAspectHeight !== undefined) {
-      if (typeof config.displayAspectHeight !== 'number' ||
-          config.displayAspectHeight <= 0 ||
-          !Number.isInteger(config.displayAspectHeight)) {
-        return { supported: false, config: clonedConfig };
-      }
-    }
+    // Note: displayAspectWidth/Height validation is now in validateVideoDecoderConfig
+    // and throws TypeError for invalid values
 
     // Check outputFormat compatibility
     if (config.outputFormat) {
@@ -242,19 +235,8 @@ export class VideoDecoder extends WebCodecsEventTarget {
       throw new DOMException('Decoder is closed', 'InvalidStateError');
     }
 
-    if (!config || typeof config !== 'object') {
-      throw new TypeError('config must be an object');
-    }
-    if (typeof config.codec !== 'string' || config.codec.length === 0) {
-      throw new TypeError('codec must be a non-empty string');
-    }
-
-    if (config.codedWidth !== undefined && (typeof config.codedWidth !== 'number' || config.codedWidth <= 0)) {
-      throw new TypeError('codedWidth must be a positive number');
-    }
-    if (config.codedHeight !== undefined && (typeof config.codedHeight !== 'number' || config.codedHeight <= 0)) {
-      throw new TypeError('codedHeight must be a positive number');
-    }
+    // Validate config using shared validation (includes displayAspectWidth/Height integer checks)
+    validateVideoDecoderConfig(config);
 
     if (!isVideoCodecBaseSupported(config.codec)) {
       throw new DOMException(`Codec '${config.codec}' is not supported`, 'NotSupportedError');
@@ -488,7 +470,7 @@ export class VideoDecoder extends WebCodecsEventTarget {
       hardwareAcceleration: this._hardwarePreference,
     });
 
-    this._decoder.on('frame', (data: { buffer?: Buffer; nativeFrame?: NativeFrame; timestamp: number }) => {
+    this._decoder.on('frame', (data: { buffer?: Buffer; nativeFrame?: NativeFrame; timestamp: number; colorSpace?: VideoColorSpaceInit }) => {
       this._handleDecodedFrame(data);
     });
 
@@ -560,7 +542,7 @@ export class VideoDecoder extends WebCodecsEventTarget {
     }
   }
 
-  private _handleDecodedFrame(data: { buffer?: Buffer; nativeFrame?: NativeFrame; timestamp: number }): void {
+  private _handleDecodedFrame(data: { buffer?: Buffer; nativeFrame?: NativeFrame; timestamp: number; colorSpace?: VideoColorSpaceInit }): void {
     if (!this._config) return;
 
     // Use the timestamp from the decoded frame (which preserves input timestamp through PTS)
@@ -610,6 +592,14 @@ export class VideoDecoder extends WebCodecsEventTarget {
     const displayWidth = this._config.displayAspectWidth;
     const displayHeight = this._config.displayAspectHeight;
 
+    // Get rotation/flip from config to apply to output frames
+    const rotation = this._config.rotation;
+    const flip = this._config.flip;
+
+    // Use config colorSpace if provided, otherwise use bitstream colorSpace
+    // This allows explicit override while still extracting bitstream info
+    const frameColorSpace = this._config.colorSpace ?? data.colorSpace;
+
     const frame = isNative
       ? new VideoFrame(data.nativeFrame!, {
         format: this._outputFormat,
@@ -619,7 +609,9 @@ export class VideoDecoder extends WebCodecsEventTarget {
         displayHeight,
         timestamp,
         duration: duration ?? undefined,
-        colorSpace: this._config.colorSpace,
+        colorSpace: frameColorSpace,
+        rotation,
+        flip,
         _nativeCleanup: () => {
           try {
             const nf = data.nativeFrame;
@@ -630,7 +622,7 @@ export class VideoDecoder extends WebCodecsEventTarget {
             // ignore cleanup errors
           }
         },
-      } as { format: VideoPixelFormat; codedWidth: number; codedHeight: number; displayWidth?: number; displayHeight?: number; timestamp: number; duration?: number; colorSpace?: VideoColorSpaceInit; _nativeCleanup?: () => void })
+      } as { format: VideoPixelFormat; codedWidth: number; codedHeight: number; displayWidth?: number; displayHeight?: number; timestamp: number; duration?: number; colorSpace?: VideoColorSpaceInit; rotation?: 0 | 90 | 180 | 270; flip?: boolean; _nativeCleanup?: () => void })
       : new VideoFrame(data.buffer!, {
         format: this._outputFormat,
         codedWidth: this._config.codedWidth!,
@@ -639,7 +631,9 @@ export class VideoDecoder extends WebCodecsEventTarget {
         displayHeight,
         timestamp,
         duration: duration ?? undefined,
-        colorSpace: this._config.colorSpace,
+        colorSpace: frameColorSpace,
+        rotation,
+        flip,
       });
 
     this._safeOutputCallback(frame);

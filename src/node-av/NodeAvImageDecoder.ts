@@ -21,9 +21,13 @@ import {
   AV_CODEC_ID_TIFF,
   AV_CODEC_ID_AV1,
   type AVCodecID,
+  type AVPixelFormat,
 } from 'node-av/constants';
 
 import type { VideoColorSpaceInit } from '../formats/index.js';
+import type { VideoPixelFormat } from '../core/VideoFrame.js';
+import { extractColorSpaceFromFrame } from '../formats/color-space.js';
+import { ffmpegToPixelFormat, pixelFormatToFFmpeg } from '../codec-utils/formats.js';
 
 export interface DecodedImageFrame {
   data: Uint8Array;
@@ -33,6 +37,7 @@ export interface DecodedImageFrame {
   duration: number;
   complete: boolean;
   colorSpace?: VideoColorSpaceInit;
+  format: VideoPixelFormat;
 }
 
 export interface ImageDecoderConfig {
@@ -41,6 +46,8 @@ export interface ImageDecoderConfig {
   desiredWidth?: number;
   desiredHeight?: number;
   colorSpace?: VideoColorSpaceInit;
+  /** Preferred output pixel format. If not specified, defaults to RGBA. */
+  preferredFormat?: VideoPixelFormat;
 }
 
 // MIME type to AVCodecID mapping
@@ -212,7 +219,20 @@ export class NodeAvImageDecoder {
   }
 
   /**
-   * Convert a decoded frame to RGBA with specific timing
+   * Get the FFmpeg format string for the target output format
+   */
+  private getTargetFormat(): { ffmpegFormat: string; webCodecsFormat: VideoPixelFormat } {
+    const preferred = this.config.preferredFormat;
+    if (!preferred || preferred === 'RGBA') {
+      return { ffmpegFormat: 'rgba', webCodecsFormat: 'RGBA' };
+    }
+    // Convert WebCodecs format to FFmpeg format
+    const ffmpegFormat = pixelFormatToFFmpeg(preferred);
+    return { ffmpegFormat, webCodecsFormat: preferred };
+  }
+
+  /**
+   * Convert a decoded frame to target format with specific timing
    */
   private async convertFrameWithTiming(
     frame: any,
@@ -226,14 +246,26 @@ export class NodeAvImageDecoder {
       return null;
     }
 
+    // Extract colorSpace from bitstream BEFORE filtering (color info is lost after format conversion)
+    // This preserves HDR/color information from AVIF, HEIC, and other formats with embedded color metadata
+    const bitstreamColorSpace = extractColorSpaceFromFrame({
+      colorPrimaries: frame.colorPrimaries,
+      colorTrc: frame.colorTrc,
+      colorSpace: frame.colorSpace,
+      colorRange: frame.colorRange,
+    });
+
+    // Determine target format
+    const { ffmpegFormat, webCodecsFormat } = this.getTargetFormat();
+
     // Build filter description for scaling and format conversion
     let filterDesc = '';
     if (this.config.desiredWidth || this.config.desiredHeight) {
       const scaleW = this.config.desiredWidth || -1;
       const scaleH = this.config.desiredHeight || -1;
-      filterDesc = `scale=${scaleW}:${scaleH},format=rgba`;
+      filterDesc = `scale=${scaleW}:${scaleH},format=${ffmpegFormat}`;
     } else {
-      filterDesc = 'format=rgba';
+      filterDesc = `format=${ffmpegFormat}`;
     }
 
     // Create or reuse filter
@@ -259,6 +291,10 @@ export class NodeAvImageDecoder {
     const buffer = filtered.toBuffer();
     filtered.unref();
 
+    // Use bitstream colorSpace if extracted, otherwise use config colorSpace
+    // Bitstream takes precedence as it represents the actual encoded color information
+    const outputColorSpace = bitstreamColorSpace ?? this.config.colorSpace;
+
     return {
       data: new Uint8Array(buffer),
       width: outputWidth,
@@ -266,7 +302,8 @@ export class NodeAvImageDecoder {
       timestamp,
       duration,
       complete: true,
-      colorSpace: this.config.colorSpace,
+      colorSpace: outputColorSpace,
+      format: webCodecsFormat,
     };
   }
 
@@ -341,7 +378,7 @@ export class NodeAvImageDecoder {
   }
 
   /**
-   * Convert a decoded frame to RGBA (for static images)
+   * Convert a decoded frame to target format (for static images)
    */
   private async convertFrame(frame: any): Promise<DecodedImageFrame | null> {
     const width = frame.width;
@@ -351,13 +388,24 @@ export class NodeAvImageDecoder {
       return null;
     }
 
+    // Extract colorSpace from bitstream BEFORE filtering (color info is lost after format conversion)
+    const bitstreamColorSpace = extractColorSpaceFromFrame({
+      colorPrimaries: frame.colorPrimaries,
+      colorTrc: frame.colorTrc,
+      colorSpace: frame.colorSpace,
+      colorRange: frame.colorRange,
+    });
+
+    // Determine target format
+    const { ffmpegFormat, webCodecsFormat } = this.getTargetFormat();
+
     let filterDesc = '';
     if (this.config.desiredWidth || this.config.desiredHeight) {
       const scaleW = this.config.desiredWidth || -1;
       const scaleH = this.config.desiredHeight || -1;
-      filterDesc = `scale=${scaleW}:${scaleH},format=rgba`;
+      filterDesc = `scale=${scaleW}:${scaleH},format=${ffmpegFormat}`;
     } else {
-      filterDesc = 'format=rgba';
+      filterDesc = `format=${ffmpegFormat}`;
     }
 
     if (!this.filter) {
@@ -382,6 +430,9 @@ export class NodeAvImageDecoder {
     const buffer = filtered.toBuffer();
     filtered.unref();
 
+    // Use bitstream colorSpace if extracted, otherwise use config colorSpace
+    const outputColorSpace = bitstreamColorSpace ?? this.config.colorSpace;
+
     // Static images have timestamp 0 and duration 0
     return {
       data: new Uint8Array(buffer),
@@ -390,7 +441,8 @@ export class NodeAvImageDecoder {
       timestamp: 0,
       duration: 0,
       complete: true,
-      colorSpace: this.config.colorSpace,
+      colorSpace: outputColorSpace,
+      format: webCodecsFormat,
     };
   }
 

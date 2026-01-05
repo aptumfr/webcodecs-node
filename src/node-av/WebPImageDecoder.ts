@@ -7,6 +7,7 @@
 
 import WebP from 'node-webpmux';
 import type { VideoColorSpaceInit } from '../formats/index.js';
+import type { VideoPixelFormat } from '../core/VideoFrame.js';
 
 export interface DecodedWebPFrame {
   data: Uint8Array;
@@ -16,6 +17,8 @@ export interface DecodedWebPFrame {
   duration: number;
   complete: boolean;
   colorSpace?: VideoColorSpaceInit;
+  /** WebP decoder always outputs RGBA (node-webpmux limitation) */
+  format: VideoPixelFormat;
 }
 
 export interface WebPDecoderConfig {
@@ -114,6 +117,7 @@ export class WebPImageDecoder {
           duration: durationUs,
           complete: true,
           colorSpace: this.config.colorSpace,
+          format: 'RGBA', // node-webpmux always outputs RGBA
         });
 
         timestamp += durationUs;
@@ -133,6 +137,7 @@ export class WebPImageDecoder {
         duration: 0,
         complete: true,
         colorSpace: this.config.colorSpace,
+        format: 'RGBA', // node-webpmux always outputs RGBA
       });
     }
 

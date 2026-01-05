@@ -877,4 +877,490 @@ describe('VideoEncoder', () => {
       expect(support.config.av1?.forceScreenContentTools).toBe(true);
     });
   });
+
+  describe('frame rescaling (N8)', () => {
+    it('should rescale input frames to match config dimensions', async () => {
+      const chunks: EncodedVideoChunk[] = [];
+
+      const encoder = new VideoEncoder({
+        output: (chunk) => chunks.push(chunk),
+        error: (err) => console.error(err),
+      });
+
+      // Configure encoder for 32x32 output
+      encoder.configure({
+        codec: 'vp8',
+        width: 32,
+        height: 32,
+      });
+
+      // Create 64x64 input frame (larger than output)
+      const data = new Uint8Array(64 * 64 * 4);
+      const frame = new VideoFrame(data, {
+        format: 'RGBA',
+        codedWidth: 64,
+        codedHeight: 64,
+        timestamp: 0,
+      });
+
+      encoder.encode(frame, { keyFrame: true });
+      frame.close();
+
+      await encoder.flush();
+      encoder.close();
+
+      // Should produce encoded output (rescaling handled by backend)
+      expect(chunks.length).toBeGreaterThan(0);
+      expect(chunks[0].type).toBe('key');
+    }, 30000);
+
+    it('should reject frames with inconsistent dimensions', async () => {
+      let receivedError: Error | null = null;
+
+      const encoder = new VideoEncoder({
+        output: () => {},
+        error: (err) => { receivedError = err; },
+      });
+
+      encoder.configure({
+        codec: 'vp8',
+        width: 64,
+        height: 64,
+      });
+
+      // First frame is 64x64
+      const data1 = new Uint8Array(64 * 64 * 4);
+      const frame1 = new VideoFrame(data1, {
+        format: 'RGBA',
+        codedWidth: 64,
+        codedHeight: 64,
+        timestamp: 0,
+      });
+
+      encoder.encode(frame1, { keyFrame: true });
+      frame1.close();
+
+      // Second frame is 32x32 (different dimensions)
+      const data2 = new Uint8Array(32 * 32 * 4);
+      const frame2 = new VideoFrame(data2, {
+        format: 'RGBA',
+        codedWidth: 32,
+        codedHeight: 32,
+        timestamp: 33333,
+      });
+
+      encoder.encode(frame2);
+      frame2.close();
+
+      // Error should have been raised for dimension mismatch
+      expect(receivedError).not.toBeNull();
+      expect(receivedError!.name).toBe('DataError');
+      expect(receivedError!.message).toContain('dimension mismatch');
+
+      encoder.close();
+    });
+
+    it('should allow upscaling from small to large dimensions', async () => {
+      const chunks: EncodedVideoChunk[] = [];
+
+      const encoder = new VideoEncoder({
+        output: (chunk) => chunks.push(chunk),
+        error: (err) => console.error(err),
+      });
+
+      // Configure encoder for 64x64 output
+      encoder.configure({
+        codec: 'vp8',
+        width: 64,
+        height: 64,
+      });
+
+      // Create 32x32 input frame (smaller than output - will be upscaled)
+      const data = new Uint8Array(32 * 32 * 4);
+      const frame = new VideoFrame(data, {
+        format: 'RGBA',
+        codedWidth: 32,
+        codedHeight: 32,
+        timestamp: 0,
+      });
+
+      encoder.encode(frame, { keyFrame: true });
+      frame.close();
+
+      await encoder.flush();
+      encoder.close();
+
+      // Should produce encoded output (upscaling handled by backend)
+      expect(chunks.length).toBeGreaterThan(0);
+    }, 30000);
+  });
+
+  describe('orientation metadata (N2)', () => {
+    it('should include rotation in decoderConfig when frame has non-zero rotation', async () => {
+      let receivedMetadata: any = null;
+
+      const encoder = new VideoEncoder({
+        output: (_chunk, metadata) => {
+          if (metadata?.decoderConfig) {
+            receivedMetadata = metadata;
+          }
+        },
+        error: () => {},
+      });
+
+      encoder.configure({
+        codec: 'vp8',
+        width: 64,
+        height: 64,
+      });
+
+      // Create frame with rotation
+      const data = new Uint8Array(64 * 64 * 4);
+      const frame = new VideoFrame(data, {
+        format: 'RGBA',
+        codedWidth: 64,
+        codedHeight: 64,
+        timestamp: 0,
+        rotation: 90,
+      });
+
+      encoder.encode(frame, { keyFrame: true });
+      frame.close();
+
+      await encoder.flush();
+      encoder.close();
+
+      expect(receivedMetadata).not.toBeNull();
+      expect(receivedMetadata.decoderConfig.rotation).toBe(90);
+    }, 30000);
+
+    it('should include flip in decoderConfig when frame has flip=true', async () => {
+      let receivedMetadata: any = null;
+
+      const encoder = new VideoEncoder({
+        output: (_chunk, metadata) => {
+          if (metadata?.decoderConfig) {
+            receivedMetadata = metadata;
+          }
+        },
+        error: () => {},
+      });
+
+      encoder.configure({
+        codec: 'vp8',
+        width: 64,
+        height: 64,
+      });
+
+      // Create frame with flip
+      const data = new Uint8Array(64 * 64 * 4);
+      const frame = new VideoFrame(data, {
+        format: 'RGBA',
+        codedWidth: 64,
+        codedHeight: 64,
+        timestamp: 0,
+        flip: true,
+      });
+
+      encoder.encode(frame, { keyFrame: true });
+      frame.close();
+
+      await encoder.flush();
+      encoder.close();
+
+      expect(receivedMetadata).not.toBeNull();
+      expect(receivedMetadata.decoderConfig.flip).toBe(true);
+    }, 30000);
+
+    it('should not include rotation/flip when frame has default orientation', async () => {
+      let receivedMetadata: any = null;
+
+      const encoder = new VideoEncoder({
+        output: (_chunk, metadata) => {
+          if (metadata?.decoderConfig) {
+            receivedMetadata = metadata;
+          }
+        },
+        error: () => {},
+      });
+
+      encoder.configure({
+        codec: 'vp8',
+        width: 64,
+        height: 64,
+      });
+
+      // Create frame with default orientation
+      const data = new Uint8Array(64 * 64 * 4);
+      const frame = new VideoFrame(data, {
+        format: 'RGBA',
+        codedWidth: 64,
+        codedHeight: 64,
+        timestamp: 0,
+      });
+
+      encoder.encode(frame, { keyFrame: true });
+      frame.close();
+
+      await encoder.flush();
+      encoder.close();
+
+      expect(receivedMetadata).not.toBeNull();
+      expect(receivedMetadata.decoderConfig.rotation).toBeUndefined();
+      expect(receivedMetadata.decoderConfig.flip).toBeUndefined();
+    }, 30000);
+
+    it('should call error callback when frames have inconsistent rotation', async () => {
+      let receivedError: Error | null = null;
+
+      const encoder = new VideoEncoder({
+        output: () => {},
+        error: (err) => { receivedError = err; },
+      });
+
+      encoder.configure({
+        codec: 'vp8',
+        width: 64,
+        height: 64,
+      });
+
+      // First frame with rotation=0
+      const data1 = new Uint8Array(64 * 64 * 4);
+      const frame1 = new VideoFrame(data1, {
+        format: 'RGBA',
+        codedWidth: 64,
+        codedHeight: 64,
+        timestamp: 0,
+        rotation: 0,
+      });
+
+      encoder.encode(frame1, { keyFrame: true });
+      frame1.close();
+
+      // Second frame with different rotation
+      const data2 = new Uint8Array(64 * 64 * 4);
+      const frame2 = new VideoFrame(data2, {
+        format: 'RGBA',
+        codedWidth: 64,
+        codedHeight: 64,
+        timestamp: 33333,
+        rotation: 90,
+      });
+
+      encoder.encode(frame2);
+      frame2.close();
+
+      // Error should have been raised
+      expect(receivedError).not.toBeNull();
+      expect(receivedError!.name).toBe('DataError');
+      expect(receivedError!.message).toContain('orientation mismatch');
+
+      encoder.close();
+    });
+
+    it('should call error callback when frames have inconsistent flip', async () => {
+      let receivedError: Error | null = null;
+
+      const encoder = new VideoEncoder({
+        output: () => {},
+        error: (err) => { receivedError = err; },
+      });
+
+      encoder.configure({
+        codec: 'vp8',
+        width: 64,
+        height: 64,
+      });
+
+      // First frame with flip=false
+      const data1 = new Uint8Array(64 * 64 * 4);
+      const frame1 = new VideoFrame(data1, {
+        format: 'RGBA',
+        codedWidth: 64,
+        codedHeight: 64,
+        timestamp: 0,
+        flip: false,
+      });
+
+      encoder.encode(frame1, { keyFrame: true });
+      frame1.close();
+
+      // Second frame with different flip
+      const data2 = new Uint8Array(64 * 64 * 4);
+      const frame2 = new VideoFrame(data2, {
+        format: 'RGBA',
+        codedWidth: 64,
+        codedHeight: 64,
+        timestamp: 33333,
+        flip: true,
+      });
+
+      encoder.encode(frame2);
+      frame2.close();
+
+      // Error should have been raised
+      expect(receivedError).not.toBeNull();
+      expect(receivedError!.name).toBe('DataError');
+      expect(receivedError!.message).toContain('orientation mismatch');
+
+      encoder.close();
+    });
+
+    it('should allow consistent orientation across multiple frames', async () => {
+      const chunks: EncodedVideoChunk[] = [];
+      let errorOccurred = false;
+
+      const encoder = new VideoEncoder({
+        output: (chunk) => chunks.push(chunk),
+        error: () => { errorOccurred = true; },
+      });
+
+      encoder.configure({
+        codec: 'vp8',
+        width: 64,
+        height: 64,
+      });
+
+      // Encode multiple frames with same rotation
+      for (let i = 0; i < 3; i++) {
+        const data = new Uint8Array(64 * 64 * 4);
+        const frame = new VideoFrame(data, {
+          format: 'RGBA',
+          codedWidth: 64,
+          codedHeight: 64,
+          timestamp: i * 33333,
+          rotation: 180,
+          flip: true,
+        });
+
+        encoder.encode(frame, { keyFrame: i === 0 });
+        frame.close();
+      }
+
+      await encoder.flush();
+      encoder.close();
+
+      expect(errorOccurred).toBe(false);
+      expect(chunks.length).toBeGreaterThan(0);
+    }, 30000);
+  });
+});
+
+describe('VideoEncoder contentHint (P1.3)', () => {
+  it('should accept contentHint: text in isConfigSupported', async () => {
+    const support = await VideoEncoder.isConfigSupported({
+      codec: 'vp09.00.10.08',
+      width: 640,
+      height: 480,
+      contentHint: 'text',
+    });
+
+    expect(support.supported).toBe(true);
+    expect(support.config.contentHint).toBe('text');
+  });
+
+  it('should accept contentHint: detail in isConfigSupported', async () => {
+    const support = await VideoEncoder.isConfigSupported({
+      codec: 'vp09.00.10.08',
+      width: 640,
+      height: 480,
+      contentHint: 'detail',
+    });
+
+    expect(support.supported).toBe(true);
+    expect(support.config.contentHint).toBe('detail');
+  });
+
+  it('should accept contentHint: motion in isConfigSupported', async () => {
+    const support = await VideoEncoder.isConfigSupported({
+      codec: 'vp09.00.10.08',
+      width: 640,
+      height: 480,
+      contentHint: 'motion',
+    });
+
+    expect(support.supported).toBe(true);
+    expect(support.config.contentHint).toBe('motion');
+  });
+
+  it('should clone config with contentHint in isConfigSupported', async () => {
+    const originalConfig = {
+      codec: 'vp09.00.10.08',
+      width: 640,
+      height: 480,
+      contentHint: 'text' as const,
+    };
+
+    const support = await VideoEncoder.isConfigSupported(originalConfig);
+
+    expect(support.supported).toBe(true);
+    // Config should be cloned, not same reference
+    expect(support.config).not.toBe(originalConfig);
+    expect(support.config.contentHint).toBe('text');
+  });
+
+  it('should configure encoder with contentHint', () => {
+    const encoder = new VideoEncoder({
+      output: () => {},
+      error: () => {},
+    });
+
+    // Should not throw
+    expect(() => {
+      encoder.configure({
+        codec: 'vp09.00.10.08',
+        width: 640,
+        height: 480,
+        contentHint: 'text',
+      });
+    }).not.toThrow();
+
+    encoder.close();
+  });
+
+  it('should encode with contentHint: text (screen content)', async () => {
+    const chunks: EncodedVideoChunk[] = [];
+
+    const encoder = new VideoEncoder({
+      output: (chunk) => chunks.push(chunk),
+      error: (err) => { throw err; },
+    });
+
+    encoder.configure({
+      codec: 'vp09.00.10.08',
+      width: 64,
+      height: 64,
+      bitrate: 500_000,
+      contentHint: 'text',
+    });
+
+    // Create frame with text-like content (high contrast edges)
+    const data = new Uint8Array(64 * 64 * 4);
+    for (let y = 0; y < 64; y++) {
+      for (let x = 0; x < 64; x++) {
+        const idx = (y * 64 + x) * 4;
+        // Create checkerboard pattern (text-like)
+        const isWhite = (x + y) % 2 === 0;
+        data[idx] = isWhite ? 255 : 0;
+        data[idx + 1] = isWhite ? 255 : 0;
+        data[idx + 2] = isWhite ? 255 : 0;
+        data[idx + 3] = 255;
+      }
+    }
+
+    const frame = new VideoFrame(data, {
+      format: 'RGBA',
+      codedWidth: 64,
+      codedHeight: 64,
+      timestamp: 0,
+    });
+
+    encoder.encode(frame, { keyFrame: true });
+    frame.close();
+
+    await encoder.flush();
+    encoder.close();
+
+    expect(chunks.length).toBeGreaterThan(0);
+  }, 30000);
 });

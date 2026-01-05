@@ -65,6 +65,13 @@ export interface VideoEncoderConfig {
   bitrateMode?: 'constant' | 'variable' | 'quantizer';
   latencyMode?: 'quality' | 'realtime';
   /**
+   * Hint about the type of content being encoded.
+   * - 'text': Optimizes for text legibility (screen sharing with text)
+   * - 'detail': Optimizes for fine details (screen sharing with complex graphics)
+   * - 'motion': Optimizes for motion (camera video, animations)
+   */
+  contentHint?: 'text' | 'detail' | 'motion';
+  /**
    * @deprecated Use codec-specific config (avc.format, hevc.format) instead.
    * Top-level format for backwards compatibility.
    */
@@ -106,6 +113,10 @@ export interface VideoEncoderOutputMetadata {
     displayAspectWidth?: number;
     displayAspectHeight?: number;
     colorSpace?: VideoColorSpaceInit;
+    /** Frame rotation from first encoded frame */
+    rotation?: 0 | 90 | 180 | 270;
+    /** Frame flip from first encoded frame */
+    flip?: boolean;
   };
 }
 
@@ -152,7 +163,17 @@ export class VideoEncoder extends WebCodecsEventTarget {
   // For AV1, timestamps are quantized to framerate before storing
   private _pendingFrames = new Map<number, Array<{ duration: number | null; keyFrame: boolean }>>();
   private _firstChunk = true;
+  /** First frame's rotation - used to enforce consistent orientation */
+  private _firstFrameRotation: 0 | 90 | 180 | 270 = 0;
+  /** First frame's flip - used to enforce consistent orientation */
+  private _firstFrameFlip = false;
+  /** Whether we've seen the first frame (to track orientation) */
+  private _hasFirstFrame = false;
   private _inputFormat: VideoPixelFormat | null = null;
+  /** Input frame width (from first frame) - used for rescaling */
+  private _inputWidth: number | null = null;
+  /** Input frame height (from first frame) - used for rescaling */
+  private _inputHeight: number | null = null;
   private _hardwarePreference: 'no-preference' | 'prefer-hardware' | 'prefer-software' = 'no-preference';
   private _ondequeue: EventHandler | null = null;
   private _flushPromise: Promise<void> | null = null;
@@ -238,6 +259,7 @@ export class VideoEncoder extends WebCodecsEventTarget {
     if (config.av1 !== undefined) clonedConfig.av1 = { ...config.av1 };
     if (config.colorSpace !== undefined) clonedConfig.colorSpace = { ...config.colorSpace };
     if (config.maxQueueSize !== undefined) clonedConfig.maxQueueSize = config.maxQueueSize;
+    if (config.contentHint !== undefined) clonedConfig.contentHint = config.contentHint;
 
     // Check for odd dimensions (required for YUV420)
     if (config.width % 2 !== 0 || config.height % 2 !== 0) {
@@ -341,6 +363,8 @@ export class VideoEncoder extends WebCodecsEventTarget {
     this._firstChunk = true;
     this._pendingFrames.clear();
     this._inputFormat = null;
+    this._inputWidth = null;
+    this._inputHeight = null;
     this._hardwarePreference = config.hardwareAcceleration ?? 'no-preference';
     this._maxQueueSize = config.maxQueueSize ?? calculateMaxQueueSize(config.width, config.height);
 
@@ -394,6 +418,9 @@ export class VideoEncoder extends WebCodecsEventTarget {
 
     if (!this._encoder) {
       this._inputFormat = frame.format;
+      // Track input dimensions for rescaling (use codedWidth/codedHeight as input size)
+      this._inputWidth = frame.codedWidth;
+      this._inputHeight = frame.codedHeight;
       const pixFormat = pixelFormatToFFmpeg(frame.format);
       this._startEncoder(pixFormat);
     }
@@ -408,6 +435,35 @@ export class VideoEncoder extends WebCodecsEventTarget {
         `Frame format mismatch: expected ${this._inputFormat}, got ${frame.format}. All frames must use the same pixel format.`
       ));
       return;
+    }
+
+    // Validate frame dimensions consistency
+    // Per WebCodecs spec, all frames must have the same dimensions
+    if (frame.codedWidth !== this._inputWidth || frame.codedHeight !== this._inputHeight) {
+      this._safeErrorCallback(new DOMException(
+        `Frame dimension mismatch: expected ${this._inputWidth}x${this._inputHeight}, ` +
+        `got ${frame.codedWidth}x${frame.codedHeight}. All frames must have consistent dimensions.`,
+        'DataError'
+      ));
+      return;
+    }
+
+    // Track orientation metadata from first frame
+    // Per WebCodecs spec, all frames must have consistent rotation/flip
+    if (!this._hasFirstFrame) {
+      this._firstFrameRotation = frame.rotation;
+      this._firstFrameFlip = frame.flip;
+      this._hasFirstFrame = true;
+    } else {
+      // Validate orientation consistency - WebCodecs requires all frames have same orientation
+      if (frame.rotation !== this._firstFrameRotation || frame.flip !== this._firstFrameFlip) {
+        this._safeErrorCallback(new DOMException(
+          `Frame orientation mismatch: expected rotation=${this._firstFrameRotation}, flip=${this._firstFrameFlip}, ` +
+          `got rotation=${frame.rotation}, flip=${frame.flip}. All frames must have consistent orientation.`,
+          'DataError'
+        ));
+        return;
+      }
     }
 
     // Check queue saturation to prevent unbounded memory growth
@@ -488,8 +544,13 @@ export class VideoEncoder extends WebCodecsEventTarget {
         this._pendingFrames.clear();
         this._encoder = null;
         this._inputFormat = null;
+        this._inputWidth = null;
+        this._inputHeight = null;
         this._frameCount = 0;
         this._firstChunk = true;
+        this._hasFirstFrame = false;
+        this._firstFrameRotation = 0;
+        this._firstFrameFlip = false;
         this._flushPromise = null;
         resolve();
       };
@@ -527,7 +588,12 @@ export class VideoEncoder extends WebCodecsEventTarget {
     this._frameCount = 0;
     this._firstChunk = true;
     this._inputFormat = null;
+    this._inputWidth = null;
+    this._inputHeight = null;
     this._flushPromise = null;
+    this._hasFirstFrame = false;
+    this._firstFrameRotation = 0;
+    this._firstFrameFlip = false;
   }
 
   close(): void {
@@ -539,6 +605,11 @@ export class VideoEncoder extends WebCodecsEventTarget {
     this._encodeQueueSize = 0;
     this._pendingFrames.clear();
     this._flushPromise = null;
+    this._inputWidth = null;
+    this._inputHeight = null;
+    this._hasFirstFrame = false;
+    this._firstFrameRotation = 0;
+    this._firstFrameFlip = false;
   }
 
   private _startEncoder(inputFormat?: string): void {
@@ -571,6 +642,9 @@ export class VideoEncoder extends WebCodecsEventTarget {
       codec: this._config.codec,
       width: this._config.width,
       height: this._config.height,
+      // Pass input dimensions for rescaling (if different from config width/height)
+      inputWidth: this._inputWidth ?? this._config.width,
+      inputHeight: this._inputHeight ?? this._config.height,
       inputPixelFormat: pixFormat,
       framerate: this._config.framerate,
       bitrate: this._config.bitrate,
@@ -653,6 +727,9 @@ export class VideoEncoder extends WebCodecsEventTarget {
             displayAspectHeight: this._config.displayHeight ?? this._config.height,
             // Include colorSpace - use user-provided or default to BT.709
             colorSpace: this._config.colorSpace ?? defaultColorSpace,
+            // Include orientation metadata from first encoded frame
+            ...(this._firstFrameRotation !== 0 && { rotation: this._firstFrameRotation }),
+            ...(this._firstFrameFlip && { flip: this._firstFrameFlip }),
           },
         }
       : undefined;

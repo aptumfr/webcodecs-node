@@ -13,6 +13,44 @@ export interface EncodedAudioChunkInit {
   transfer?: ArrayBuffer[];
 }
 
+/** Check if an ArrayBuffer is detached */
+function isDetached(buffer: ArrayBuffer): boolean {
+  return buffer.byteLength === 0;
+}
+
+/** Validate and detach transfer list buffers */
+function validateAndDetachTransfer(transfer: ArrayBuffer[] | undefined): void {
+  if (!transfer || transfer.length === 0) return;
+
+  // Check for duplicates
+  const seen = new Set<ArrayBuffer>();
+  for (const buffer of transfer) {
+    if (!(buffer instanceof ArrayBuffer)) {
+      throw new TypeError('transfer list must only contain ArrayBuffer objects');
+    }
+    if (seen.has(buffer)) {
+      throw new DOMException('Duplicate ArrayBuffer in transfer list', 'DataCloneError');
+    }
+    if (isDetached(buffer)) {
+      throw new DOMException('Cannot transfer a detached ArrayBuffer', 'DataCloneError');
+    }
+    seen.add(buffer);
+  }
+
+  // Detach all buffers
+  for (const buffer of transfer) {
+    try {
+      if (typeof (buffer as any).transfer === 'function') {
+        (buffer as any).transfer();
+      } else if (typeof structuredClone === 'function') {
+        structuredClone(buffer, { transfer: [buffer] });
+      }
+    } catch {
+      // Ignore errors during detachment
+    }
+  }
+}
+
 export class EncodedAudioChunk {
   private _type: EncodedAudioChunkType;
   private _timestamp: number;
@@ -43,21 +81,39 @@ export class EncodedAudioChunk {
       }
     }
 
+    // Validate transfer list before copying data
+    if (init.transfer) {
+      for (const buffer of init.transfer) {
+        if (!(buffer instanceof ArrayBuffer)) {
+          throw new TypeError('transfer list must only contain ArrayBuffer objects');
+        }
+        if (isDetached(buffer)) {
+          throw new DOMException('Cannot transfer a detached ArrayBuffer', 'DataCloneError');
+        }
+      }
+      // Check for duplicates
+      const unique = new Set(init.transfer);
+      if (unique.size !== init.transfer.length) {
+        throw new DOMException('Duplicate ArrayBuffer in transfer list', 'DataCloneError');
+      }
+    }
+
     this._type = init.type;
     this._timestamp = init.timestamp;
     this._duration = init.duration ?? null;
 
+    // Copy data first, then detach transfer buffers
     if (init.data instanceof ArrayBuffer) {
-      if (init.transfer?.includes(init.data)) {
-        this._data = init.data;
-      } else {
-        this._data = init.data.slice(0);
-      }
+      // Always copy to avoid issues with transferred buffers
+      this._data = init.data.slice(0);
     } else {
       const view = init.data;
       const srcBuffer = view.buffer as ArrayBuffer;
       this._data = srcBuffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
     }
+
+    // Detach transferred buffers after data has been copied
+    validateAndDetachTransfer(init.transfer);
   }
 
   get type(): EncodedAudioChunkType { return this._type; }

@@ -39,6 +39,8 @@ import type {
   VideoDecoderBackendConfig,
   DecodedFrame,
 } from '../backends/types.js';
+import type { VideoColorSpaceInit } from '../formats/color-space.js';
+import { extractColorSpaceFromFrame } from '../formats/color-space.js';
 import { DEFAULT_FRAMERATE } from '../backends/types.js';
 import { parseCodecString } from '../hardware/index.js';
 import { createLogger } from '../utils/logger.js';
@@ -254,14 +256,24 @@ export class NodeAvVideoDecoder extends EventEmitter implements VideoDecoderBack
       // Frames come out in display order (lowest PTS first), so we pop
       // from our sorted timestamp list to recover the original timestamp.
       const timestamp = this.pendingTimestamps.shift() ?? 0;
+
+      // Extract colorSpace from the native frame BEFORE filtering
+      // (filtering destroys color info as it converts to target format)
+      const colorSpace = extractColorSpaceFromFrame({
+        colorPrimaries: (frame as any).colorPrimaries,
+        colorTrc: (frame as any).colorTrc,
+        colorSpace: (frame as any).colorSpace,
+        colorRange: (frame as any).colorRange,
+      });
+
       const output = await this.toOutput(frame);
       if (!output.nativeFrame) {
         frame.unref();
       }
       if (output.buffer) {
-        this.emit('frame', { buffer: output.buffer, timestamp });
+        this.emit('frame', { buffer: output.buffer, timestamp, colorSpace });
       } else if (output.nativeFrame) {
-        this.emit('frame', { nativeFrame: output.nativeFrame, format: this.outputPixelFormat, timestamp });
+        this.emit('frame', { nativeFrame: output.nativeFrame, format: this.outputPixelFormat, timestamp, colorSpace });
       }
       frame = await this.decoder.receive();
     }

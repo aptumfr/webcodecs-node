@@ -17,6 +17,29 @@ import {
 // Re-export types for backwards compatibility
 export type { AudioSampleFormat, AudioDataInit, AudioDataCopyToOptions };
 
+/** Check if an ArrayBuffer is detached */
+function isDetached(buffer: ArrayBuffer): boolean {
+  return buffer.byteLength === 0;
+}
+
+/** Validate and detach transfer list buffers */
+function validateAndDetachTransfer(transfer: ArrayBuffer[] | undefined): void {
+  if (!transfer || transfer.length === 0) return;
+
+  // Detach all buffers
+  for (const buffer of transfer) {
+    try {
+      if (typeof (buffer as any).transfer === 'function') {
+        (buffer as any).transfer();
+      } else if (typeof structuredClone === 'function') {
+        structuredClone(buffer, { transfer: [buffer] });
+      }
+    } catch {
+      // Ignore errors during detachment
+    }
+  }
+}
+
 export class AudioData {
   private _format: AudioSampleFormat;
   private _sampleRate: number;
@@ -61,6 +84,23 @@ export class AudioData {
       throw new TypeError('data is required');
     }
 
+    // Validate transfer list before copying data
+    if (init.transfer) {
+      for (const buffer of init.transfer) {
+        if (!(buffer instanceof ArrayBuffer)) {
+          throw new TypeError('transfer list must only contain ArrayBuffer objects');
+        }
+        if (isDetached(buffer)) {
+          throw new DOMException('Cannot transfer a detached ArrayBuffer', 'DataCloneError');
+        }
+      }
+      // Check for duplicates
+      const unique = new Set(init.transfer);
+      if (unique.size !== init.transfer.length) {
+        throw new DOMException('Duplicate ArrayBuffer in transfer list', 'DataCloneError');
+      }
+    }
+
     this._format = init.format;
     this._sampleRate = init.sampleRate;
     this._numberOfFrames = init.numberOfFrames;
@@ -74,24 +114,17 @@ export class AudioData {
       this._nativeFrame = nativeFrame;
       this._buffer = new ArrayBuffer(0);
     } else if (init.data instanceof ArrayBuffer) {
-      if (init.transfer?.includes(init.data)) {
-        this._buffer = init.data;
-      } else {
-        this._buffer = init.data.slice(0);
-      }
+      // Always copy to avoid issues with transferred buffers
+      this._buffer = init.data.slice(0);
     } else {
       // ArrayBufferView
       const view = init.data as ArrayBufferView;
       const srcBuffer = view.buffer as ArrayBuffer;
-      if (init.transfer?.includes(srcBuffer)) {
-        this._buffer = srcBuffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
-      } else {
-        this._buffer = srcBuffer.slice(
-          view.byteOffset,
-          view.byteOffset + view.byteLength
-        );
-      }
+      this._buffer = srcBuffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
     }
+
+    // Detach transferred buffers after data has been copied
+    validateAndDetachTransfer(init.transfer);
 
     // Validate data size
     const expectedSize = this._calculateTotalSize();
