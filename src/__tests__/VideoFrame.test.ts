@@ -1767,10 +1767,10 @@ describe('VideoFrame 10-bit/12-bit formats (P1.4)', () => {
 });
 
 describe('VideoFrame high-bit-depth alpha formats', () => {
-  it('should construct I420A10 frame (10-bit with alpha)', () => {
+  it('should construct I420AP10 frame (10-bit with alpha)', () => {
     const width = 4;
     const height = 4;
-    // I420A10: 2 bytes per sample, 4 planes (Y, U, V, A)
+    // I420AP10: 2 bytes per sample, 4 planes (Y, U, V, A)
     // Y: 4*4*2 = 32, U: 2*2*2 = 8, V: 2*2*2 = 8, A: 4*4*2 = 32, total = 80
     const ySize = width * height * 2;
     const uvSize = (width / 2) * (height / 2) * 2;
@@ -1778,35 +1778,35 @@ describe('VideoFrame high-bit-depth alpha formats', () => {
     const data = new Uint8Array(ySize + uvSize * 2 + aSize);
 
     const frame = new VideoFrame(data, {
-      format: 'I420A10',
+      format: 'I420AP10',
       codedWidth: width,
       codedHeight: height,
       timestamp: 0,
     });
 
-    expect(frame.format).toBe('I420A10');
+    expect(frame.format).toBe('I420AP10');
     expect(frame.numberOfPlanes).toBe(4); // Y, U, V, A
 
     frame.close();
   });
 
-  it('should construct I420A12 frame (12-bit with alpha)', () => {
+  it('should construct I420AP12 frame (12-bit with alpha)', () => {
     const width = 4;
     const height = 4;
-    // I420A12: same size as I420A10 (16-bit container)
+    // I420AP12: same size as I420AP10 (16-bit container)
     const ySize = width * height * 2;
     const uvSize = (width / 2) * (height / 2) * 2;
     const aSize = width * height * 2;
     const data = new Uint8Array(ySize + uvSize * 2 + aSize);
 
     const frame = new VideoFrame(data, {
-      format: 'I420A12',
+      format: 'I420AP12',
       codedWidth: width,
       codedHeight: height,
       timestamp: 0,
     });
 
-    expect(frame.format).toBe('I420A12');
+    expect(frame.format).toBe('I420AP12');
     expect(frame.numberOfPlanes).toBe(4);
 
     frame.close();
@@ -1854,10 +1854,10 @@ describe('VideoFrame high-bit-depth alpha formats', () => {
     frame.close();
   });
 
-  it('should construct I422A10 frame (10-bit 4:2:2 with alpha)', () => {
+  it('should construct I422AP10 frame (10-bit 4:2:2 with alpha)', () => {
     const width = 4;
     const height = 4;
-    // I422A10: 2 bytes per sample
+    // I422AP10: 2 bytes per sample
     // Y: 4*4*2 = 32, U: 2*4*2 = 16, V: 2*4*2 = 16, A: 4*4*2 = 32, total = 96
     const ySize = width * height * 2;
     const uvSize = (width / 2) * height * 2;
@@ -1865,34 +1865,34 @@ describe('VideoFrame high-bit-depth alpha formats', () => {
     const data = new Uint8Array(ySize + uvSize * 2 + aSize);
 
     const frame = new VideoFrame(data, {
-      format: 'I422A10',
+      format: 'I422AP10',
       codedWidth: width,
       codedHeight: height,
       timestamp: 0,
     });
 
-    expect(frame.format).toBe('I422A10');
+    expect(frame.format).toBe('I422AP10');
     expect(frame.numberOfPlanes).toBe(4);
 
     frame.close();
   });
 
-  it('should construct I444A10 frame (10-bit 4:4:4 with alpha)', () => {
+  it('should construct I444AP10 frame (10-bit 4:4:4 with alpha)', () => {
     const width = 4;
     const height = 4;
-    // I444A10: 2 bytes per sample, 4 planes all full size
+    // I444AP10: 2 bytes per sample, 4 planes all full size
     // Y: 32, U: 32, V: 32, A: 32, total = 128
     const planeSize = width * height * 2;
     const data = new Uint8Array(planeSize * 4);
 
     const frame = new VideoFrame(data, {
-      format: 'I444A10',
+      format: 'I444AP10',
       codedWidth: width,
       codedHeight: height,
       timestamp: 0,
     });
 
-    expect(frame.format).toBe('I444A10');
+    expect(frame.format).toBe('I444AP10');
     expect(frame.numberOfPlanes).toBe(4);
 
     frame.close();
@@ -1902,11 +1902,11 @@ describe('VideoFrame high-bit-depth alpha formats', () => {
     const width = 4;
     const height = 4;
 
-    // I420A10: (16 + 4 + 4 + 16) * 2 = 80
+    // I420AP10: (16 + 4 + 4 + 16) * 2 = 80
     const i420a10Size = (width * height * 2 + 2 * (width / 2) * (height / 2)) * 2;
     const i420a10Data = new Uint8Array(i420a10Size);
     const i420a10Frame = new VideoFrame(i420a10Data, {
-      format: 'I420A10',
+      format: 'I420AP10',
       codedWidth: width,
       codedHeight: height,
       timestamp: 0,
@@ -1914,11 +1914,11 @@ describe('VideoFrame high-bit-depth alpha formats', () => {
     expect(i420a10Frame.allocationSize()).toBe(i420a10Size);
     i420a10Frame.close();
 
-    // I444A10: 4 planes all full size at 2 bytes = 4*4*4*2 = 128
+    // I444AP10: 4 planes all full size at 2 bytes = 4*4*4*2 = 128
     const i444a10Size = width * height * 4 * 2;
     const i444a10Data = new Uint8Array(i444a10Size);
     const i444a10Frame = new VideoFrame(i444a10Data, {
-      format: 'I444A10',
+      format: 'I444AP10',
       codedWidth: width,
       codedHeight: height,
       timestamp: 0,

@@ -218,6 +218,19 @@ export class AudioDecoder extends WebCodecsEventTarget {
       throw new TypeError(`Invalid outputFormat: ${config.outputFormat}`);
     }
 
+    // Check for detached description ArrayBuffer
+    if (config.description !== undefined) {
+      const desc = config.description;
+      const buffer = desc instanceof ArrayBuffer ? desc : (desc as ArrayBufferView).buffer;
+      // Check using Node.js 20+ .detached property or fallback to byteLength check
+      const isDetached = (buffer as any).detached === true ||
+        ((buffer as any).detached === undefined && buffer.byteLength === 0 &&
+         !(desc instanceof ArrayBuffer && desc.byteLength === 0));
+      if (isDetached) {
+        throw new TypeError('description ArrayBuffer is detached');
+      }
+    }
+
     // Opus with >2 channels requires description (mapping table per WebCodecs spec)
     if (codecBase === 'opus' && config.numberOfChannels > 2 && config.description === undefined) {
       throw new DOMException('Opus decoder with >2 channels requires description (mapping table)', 'NotSupportedError');

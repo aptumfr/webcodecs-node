@@ -36,8 +36,8 @@ export type { VideoPixelFormat, VideoFrameBufferInit, VideoFrameCopyToOptions, V
 const VALID_PIXEL_FORMATS: Set<VideoPixelFormat> = new Set([
   'I420', 'I420A', 'I422', 'I422A', 'I444', 'I444A', 'NV12',
   'RGBA', 'RGBX', 'BGRA', 'BGRX',
-  'I420P10', 'I420A10', 'I422P10', 'I422A10', 'I444P10', 'I444A10', 'P010',
-  'I420P12', 'I420A12', 'I422P12', 'I422A12', 'I444P12', 'I444A12',
+  'I420P10', 'I420AP10', 'I422P10', 'I422AP10', 'I444P10', 'I444AP10', 'P010',
+  'I420P12', 'I420AP12', 'I422P12', 'I422AP12', 'I444P12', 'I444AP12',
 ]);
 
 /**
@@ -493,15 +493,20 @@ export class VideoFrame {
       validateDuration(bufferInit.duration);
       // Validate rotation if provided
       validateRotation(bufferInit.rotation);
-      // Validate transfer list if provided (check for already detached buffers)
+      // Validate transfer list if provided (check for duplicates and detached buffers)
       if (bufferInit.transfer) {
+        const seen = new Set<ArrayBuffer>();
         for (const buffer of bufferInit.transfer) {
           if (!(buffer instanceof ArrayBuffer)) {
             throw new TypeError('transfer list must only contain ArrayBuffer objects');
           }
+          if (seen.has(buffer)) {
+            throw new DOMException('Duplicate ArrayBuffer in transfer list', 'DataCloneError');
+          }
           if (isDetached(buffer)) {
             throw new DOMException('Cannot transfer a detached ArrayBuffer', 'DataCloneError');
           }
+          seen.add(buffer);
         }
       }
 

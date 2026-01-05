@@ -278,30 +278,60 @@ export class ImageDecoder {
       this._rejectCompleted = reject;
     });
 
-    const transferSet = new Set(init.transfer || []);
+    // Validate transfer list if provided (check for duplicates and detached buffers)
+    const transferList = init.transfer || [];
+    const transferSet = new Set<ArrayBuffer>();
+    for (const buffer of transferList) {
+      if (!(buffer instanceof ArrayBuffer)) {
+        throw new TypeError('transfer list must only contain ArrayBuffer objects');
+      }
+      if (transferSet.has(buffer)) {
+        throw new DOMException('Duplicate ArrayBuffer in transfer list', 'DataCloneError');
+      }
+      if (buffer.byteLength === 0 && (buffer as any).detached !== false) {
+        // Check for detached buffer (byteLength 0 and not explicitly non-detached)
+        throw new DOMException('Cannot transfer a detached ArrayBuffer', 'DataCloneError');
+      }
+      transferSet.add(buffer);
+    }
 
     if (init.data instanceof ArrayBuffer) {
-      if (transferSet.has(init.data)) {
-        this._data = new Uint8Array(init.data);
-      } else {
-        this._data = new Uint8Array(init.data.slice(0));
-      }
+      // Always copy the data - even when transferred, we need our own copy
+      // before detaching the original (transfer means caller loses access, not zero-copy)
+      this._data = new Uint8Array(init.data.slice(0));
       this._complete = true;
+      this._detachTransferBuffers(transferList);
       this._initializeTracks();
     } else if (ArrayBuffer.isView(init.data)) {
       const view = init.data;
-      if (view.buffer instanceof ArrayBuffer && transferSet.has(view.buffer)) {
-        this._data = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-      } else {
-        this._data = new Uint8Array(view.byteLength);
-        this._data.set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
-      }
+      // Always copy the data before potentially detaching the backing buffer
+      this._data = new Uint8Array(view.byteLength);
+      this._data.set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
       this._complete = true;
+      this._detachTransferBuffers(transferList);
       this._initializeTracks();
     } else if (isReadableStream(init.data)) {
+      this._detachTransferBuffers(transferList);
       this._readStream(init.data as ReadableStream<ArrayBufferView>);
     } else {
       throw new TypeError('data must be ArrayBuffer, ArrayBufferView, or ReadableStream');
+    }
+  }
+
+  /**
+   * Detach ArrayBuffers after data has been copied
+   */
+  private _detachTransferBuffers(buffers: ArrayBuffer[]): void {
+    for (const buffer of buffers) {
+      try {
+        if (typeof (buffer as any).transfer === 'function') {
+          (buffer as any).transfer();
+        } else if (typeof structuredClone === 'function') {
+          structuredClone(buffer, { transfer: [buffer] });
+        }
+      } catch {
+        // Ignore errors during detachment
+      }
     }
   }
 
