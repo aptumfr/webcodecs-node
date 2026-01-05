@@ -504,10 +504,19 @@ describe('VideoDecoder encode-decode roundtrip', () => {
     // The decoder should output same number of frames as input chunks
     expect(decodedFrames.length).toBe(encodedChunks.length);
 
-    // Each decoded frame should have the timestamp from the corresponding chunk
-    for (let i = 0; i < decodedFrames.length; i++) {
-      expect(decodedFrames[i].timestamp).toBe(encodedChunks[i].timestamp);
-      decodedFrames[i].close();
+    // With B-frames, chunks arrive in decode order but frames output in display order.
+    // The set of timestamps should match, but order may differ.
+    const chunkTimestamps = encodedChunks.map(c => c.timestamp).sort((a, b) => a - b);
+    const frameTimestamps = decodedFrames.map(f => f.timestamp).sort((a, b) => a - b);
+    expect(frameTimestamps).toEqual(chunkTimestamps);
+
+    // Frames should come out in display order (sorted by timestamp)
+    for (let i = 1; i < decodedFrames.length; i++) {
+      expect(decodedFrames[i].timestamp).toBeGreaterThan(decodedFrames[i - 1].timestamp);
+    }
+
+    for (const frame of decodedFrames) {
+      frame.close();
     }
   }, 30000);
 });

@@ -7,6 +7,7 @@
 
 import { EventEmitter } from 'events';
 import type { AudioSampleFormat } from '../formats/audio-formats.js';
+import type { VideoColorSpaceInit } from '../formats/color-space.js';
 
 /**
  * Encoded frame data emitted by encoders
@@ -46,6 +47,8 @@ export interface VideoEncoderBackendConfig {
   hardwareAcceleration?: 'no-preference' | 'prefer-hardware' | 'prefer-software';
   /** Output format: 'annexb' for raw Annex B, 'mp4' for length-prefixed (AVCC/HVCC) */
   format?: 'annexb' | 'mp4';
+  /** Color space for HDR encoding with optional HDR metadata */
+  colorSpace?: VideoColorSpaceInit;
 }
 
 /**

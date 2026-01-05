@@ -189,7 +189,7 @@ export class AudioDecoder extends WebCodecsEventTarget {
 
     try {
       const bufferData = Buffer.from(chunk._rawData);
-      this._decoder.write(bufferData);
+      this._decoder.write(bufferData, chunk.timestamp);
     } catch {
       this._decodeQueueSize = Math.max(0, this._decodeQueueSize - 1);
       this._safeErrorCallback(encodingError('Failed to write chunk data to decoder'));
@@ -319,7 +319,8 @@ export class AudioDecoder extends WebCodecsEventTarget {
   private _handleDecodedFrame(frame: { data?: Buffer; nativeFrame?: NativeFrame; numberOfFrames: number; timestamp: number }): void {
     if (!this._config) return;
 
-    const timestamp = (this._frameIndex * 1_000_000) / this._config.sampleRate;
+    // Use actual timestamp from the decoded frame (in microseconds)
+    const timestamp = frame.timestamp;
 
     // Build init with optional native frame properties
     const init: {

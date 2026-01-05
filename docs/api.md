@@ -400,9 +400,11 @@ new VideoFrame(data: BufferSource, init: VideoFrameBufferInit)
 
 *10-bit formats (HDR):*
 - `'I420P10'` - YUV 4:2:0 planar, 10-bit (16-bit container)
-- `'I422P10'` - YUV 4:2:2 planar, 10-bit (16-bit container)
-- `'I444P10'` - YUV 4:4:4 planar, 10-bit (16-bit container)
+- `'I422P10'` - YUV 4:2:2 planar, 10-bit (16-bit container) - downconverted to 4:2:0 during encoding
+- `'I444P10'` - YUV 4:4:4 planar, 10-bit (16-bit container) - downconverted to 4:2:0 during encoding
 - `'P010'` - YUV 4:2:0 semi-planar, 10-bit (16-bit container)
+
+> **Note:** 10-bit encoding requires HEVC, VP9, or AV1 codec. H.264 will downconvert to 8-bit. I422P10/I444P10 are decoded correctly but downconverted to I420P10 during encoding.
 
 ### Instance Methods
 

@@ -45,15 +45,16 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
   private encoder: Encoder | null = null;
   private config: AudioEncoderBackendConfig | null = null;
   private frameIndex = 0;
-  private queue: Array<{ buffer?: Buffer; frame?: Frame; owned?: boolean }> = [];
+  private queue: Array<{ buffer?: Buffer; frame?: Frame; owned?: boolean; timestamp?: number }> = [];
   private processing = false;
   private processingPromise: Promise<void> | null = null;
   private shuttingDown = false;
   private sampleFormat: AVSampleFormat = AV_SAMPLE_FMT_FLT;
   private encoderSampleFormat: AVSampleFormat = AV_SAMPLE_FMT_FLTP;
-  private timeBase: Rational = new Rational(1, OPUS_SAMPLE_RATE);
+  private timeBase: Rational = new Rational(1, 1_000_000); // Microsecond timebase
   private codecDescription: Buffer | null = null;
   private firstFrame = true;
+  private pendingTimestamp = 0; // Track input timestamp for output correlation
   // Resampling support for Opus with non-48kHz input
   private resampler: FilterAPI | null = null;
   private needsResampling = false;
@@ -104,17 +105,20 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
     return 'aac';
   }
 
-  write(data: Buffer | Uint8Array): boolean {
+  write(data: Buffer | Uint8Array, timestamp?: number): boolean {
     if (!this.config || this.shuttingDown) {
       return false;
     }
 
-    this.queue.push({ buffer: Buffer.from(data), owned: true });
+    this.queue.push({ buffer: Buffer.from(data), owned: true, timestamp: timestamp ?? this.pendingTimestamp });
+    // Advance pending timestamp by the sample count we just added
+    const samplesPerChannel = data.byteLength / 4 / (this.config.numberOfChannels ?? 2); // f32 = 4 bytes
+    this.pendingTimestamp += (samplesPerChannel * 1_000_000) / this.config.sampleRate;
     void this.processQueue();
     return true;
   }
 
-  writeFrame(frame: Frame, owned: boolean = true): boolean {
+  writeFrame(frame: Frame, owned: boolean = true, timestamp?: number): boolean {
     if (!this.config || this.shuttingDown) {
       return false;
     }
@@ -124,7 +128,16 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       if (owned) {
         try { frame.unref(); } catch { /* ignore */ }
       }
-      this.queue.push({ buffer: Buffer.from(buf), owned: true });
+      // Use provided timestamp, or try to get from frame.pts, or default to 0
+      let ts = timestamp;
+      if (ts === undefined && (frame as any).pts !== undefined) {
+        const pts = (frame as any).pts;
+        const tb = (frame as any).timeBase;
+        if (tb && typeof tb.num === 'number' && typeof tb.den === 'number') {
+          ts = Number((BigInt(pts) * BigInt(tb.num) * 1_000_000n) / BigInt(tb.den));
+        }
+      }
+      this.queue.push({ buffer: Buffer.from(buf), owned: true, timestamp: ts ?? 0 });
       void this.processQueue();
       return true;
     } catch (err) {
@@ -167,9 +180,9 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
           // Emit frameAccepted when frame starts processing (for dequeue event)
           setImmediate(() => this.emit('frameAccepted'));
           if (item.frame) {
-            await this.encodeFrame(item.frame, item.owned ?? true);
+            await this.encodeFrame(item.frame, item.owned ?? true, item.timestamp);
           } else if (item.buffer) {
-            await this.encodeBuffer(item.buffer);
+            await this.encodeBuffer(item.buffer, item.timestamp);
           }
         }
       } catch (err) {
@@ -211,18 +224,23 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
     this.extractCodecDescription();
   }
 
-  private async encodeFrame(inputFrame: Frame, owned: boolean): Promise<void> {
+  private async encodeFrame(inputFrame: Frame, owned: boolean, timestamp?: number): Promise<void> {
     try {
       await this.ensureEncoder();
       if (!this.encoder || !this.config) {
         throw new Error('Encoder not initialized');
       }
 
+      // Use provided timestamp or compute from sample position
+      const inputTimestamp = timestamp ?? this.pendingTimestamp;
+
       const matchesFormat = inputFrame.format === this.encoderSampleFormat;
       const matchesRate = Number(inputFrame.sampleRate ?? this.config.sampleRate) === this.config.sampleRate;
 
       if (matchesFormat && matchesRate) {
-        inputFrame.pts = BigInt(this.frameIndex);
+        // Set PTS based on actual timestamp
+        const sampleRate = Number(inputFrame.sampleRate ?? this.config.sampleRate);
+        inputFrame.pts = BigInt(Math.round(inputTimestamp * sampleRate / 1_000_000));
         const nbSamples = inputFrame.nbSamples ?? 0;
         try {
           await this.encoder.encode(inputFrame);
@@ -242,7 +260,7 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       if (owned) {
         inputFrame.unref();
       }
-      await this.encodeBuffer(buffer);
+      await this.encodeBuffer(buffer, inputTimestamp);
     } catch (err) {
       if (owned) {
         try { inputFrame.unref(); } catch { /* ignore */ }
@@ -366,6 +384,8 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
     }
 
     const options: Record<string, string | number> = {};
+    const isConstantBitrate = this.config.bitrateMode === 'constant';
+    const isVariableBitrate = this.config.bitrateMode === 'variable';
 
     // Codec-specific options
     if (isOpus) {
@@ -373,6 +393,22 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       if (isRealtime) {
         options.frame_duration = '10';
       }
+      // Opus VBR control: 'on' (default), 'off' (CBR), 'constrained'
+      if (isConstantBitrate) {
+        options.vbr = 'off';
+      } else if (isVariableBitrate) {
+        options.vbr = 'on';
+      }
+    }
+
+    // AAC bitrateMode: CBR uses bitrate, VBR uses global_quality
+    if (codecBase === 'aac' || codecBase === 'mp4a') {
+      if (isVariableBitrate && !this.config.bitrate) {
+        // VBR mode with quality-based encoding (1-5 scale for libfdk_aac, 0.1-2 for native aac)
+        // Use a reasonable default quality
+        options.global_quality = 4;
+      }
+      // CBR is default when bitrate is specified
     }
 
     // Frame size configuration for specific codecs
@@ -410,11 +446,13 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
     }
   }
 
-  private async encodeBuffer(buffer: Buffer): Promise<void> {
+  private async encodeBuffer(buffer: Buffer, timestamp?: number): Promise<void> {
     await this.ensureEncoder();
     if (!this.encoder || !this.config) {
       throw new Error('Encoder not initialized');
     }
+    // Use provided timestamp or compute from sample position
+    const inputTimestamp = timestamp ?? this.pendingTimestamp;
 
     // Buffer is f32le interleaved, we need to convert to the encoder's expected format
     // Calculate number of samples (each sample is 4 bytes for f32)
@@ -466,9 +504,10 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
 
     // If resampling is needed, process through resampler
     if (this.needsResampling && this.resampler) {
-      // Set input PTS for correct resampler timing
-      // Use input sample count (not output) for input frame timing
-      inputFrame.pts = BigInt(this.frameIndex);
+      // Set input PTS based on actual input timestamp (converted to sample units)
+      // PTS = timestamp_us * sampleRate / 1_000_000
+      const ptsInSamples = BigInt(Math.round(inputTimestamp * this.inputSampleRate / 1_000_000));
+      inputFrame.pts = ptsInSamples;
 
       await this.resampler.process(inputFrame);
       inputFrame.unref();
@@ -478,8 +517,11 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       let resampledFrame = await this.resampler.receive();
       while (resampledFrame) {
         const outputSamples = resampledFrame.nbSamples ?? 0;
-        // PTS comes from resampler, but we track output sample count for our index
-        resampledFrame.pts = BigInt(this.frameIndex);
+        // Use input timestamp converted to encoder sample rate for PTS
+        // Do NOT add frameIndex - that would cause timestamp drift
+        // PTS = timestamp_us * encoderSampleRate / 1_000_000
+        const outputPts = BigInt(Math.round(inputTimestamp * this.encoderSampleRate / 1_000_000));
+        resampledFrame.pts = outputPts;
 
         await this.encoder.encode(resampledFrame);
         resampledFrame.unref();
@@ -491,7 +533,9 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       }
     } else {
       // No resampling - encode directly
-      inputFrame.pts = BigInt(this.frameIndex);
+      // PTS = timestamp_us * sampleRate / 1_000_000
+      const ptsInSamples = BigInt(Math.round(inputTimestamp * this.inputSampleRate / 1_000_000));
+      inputFrame.pts = ptsInSamples;
       await this.encoder.encode(inputFrame);
       inputFrame.unref();
       this.frameIndex += samplesPerChannel;
@@ -641,10 +685,25 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       if (packet.data) {
         const timestamp = packet.pts !== undefined ? Number(packet.pts) : this.frameIndex;
         const keyFrame = (packet.flags & AV_PKT_FLAG_KEY) === AV_PKT_FLAG_KEY || (packet as any).isKeyframe;
+
+        // Get actual duration from packet (in timebase units), convert to samples
+        // This handles variable frame sizes (PCM, Opus with different frame durations)
+        let durationSamples: number | undefined;
+        if (packet.duration !== undefined && packet.duration > 0n) {
+          const tb = packet.timeBase;
+          if (tb && tb.den > 0) {
+            // duration is in timebase units, convert to samples at encoder sample rate
+            // duration_seconds = duration * (tb.num / tb.den)
+            // duration_samples = duration_seconds * sampleRate
+            durationSamples = Number((packet.duration * BigInt(tb.num) * BigInt(this.encoderSampleRate)) / BigInt(tb.den));
+          }
+        }
+
         const frameData: any = {
           data: Buffer.from(packet.data),
           timestamp,
           keyFrame,
+          durationSamples,
         };
         // Include codec description on the first frame
         if (this.firstFrame && this.codecDescription) {

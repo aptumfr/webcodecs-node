@@ -112,6 +112,15 @@ export class NodeAvMuxer implements IMuxer {
   private _videoChunkCount = 0;
   private _audioChunkCount = 0;
   private _headerWritten = false;
+  // Track DTS for monotonic ordering (required by container formats)
+  private _lastVideoDts = -1n;
+  private _lastAudioDts = -1n;
+  // Buffer video packets until we can determine B-frame pattern
+  private _videoPacketBuffer: Array<{ pts: bigint; duration: bigint; data: Buffer; isKeyframe: boolean }> = [];
+  private _videoPtsOffset = 0n;
+  private _videoBufferAnalyzed = false;
+  // Track if B-frames were detected - when false, use DTS = PTS
+  private _hasBFrames = false;
 
   constructor(config: MuxerConfig) {
     this.config = config;
@@ -255,13 +264,117 @@ export class NodeAvMuxer implements IMuxer {
       return BigInt(Math.round(us * streamTimeBase.den / (1_000_000 * streamTimeBase.num)));
     };
 
-    packet.pts = usToStreamTs(chunk.timestamp);
-    packet.dts = usToStreamTs(chunk.timestamp);
-    if (chunk.duration) {
-      packet.duration = usToStreamTs(chunk.duration);
+    // Use actual chunk timestamp as PTS (presentation time)
+    const pts = usToStreamTs(chunk.timestamp);
+    const frameDuration = usToStreamTs(chunk.duration ?? 33333);
+    const isKeyframe = chunk.type === 'key';
+
+    // Buffer packets until we can analyze B-frame pattern (wait for second keyframe or enough packets)
+    if (!this._videoBufferAnalyzed) {
+      this._videoPacketBuffer.push({ pts, duration: frameDuration, data: Buffer.from(chunk._buffer), isKeyframe });
+
+      // Analyze after we have: second keyframe, or 30 packets, or detect out-of-order PTS
+      const hasSecondKeyframe = this._videoPacketBuffer.filter(p => p.isKeyframe).length >= 2;
+      const hasEnoughPackets = this._videoPacketBuffer.length >= 30;
+      const hasOutOfOrderPts = this._videoPacketBuffer.length >= 2 &&
+        this._videoPacketBuffer.some((p, i) => i > 0 && p.pts < this._videoPacketBuffer[i - 1].pts);
+
+      if (hasSecondKeyframe || hasEnoughPackets || hasOutOfOrderPts) {
+        this._videoBufferAnalyzed = true;
+
+        // Check if there are B-frames (out-of-order PTS)
+        let maxPtsDrop = 0n;
+        for (let i = 1; i < this._videoPacketBuffer.length; i++) {
+          if (this._videoPacketBuffer[i].pts < this._videoPacketBuffer[i - 1].pts) {
+            this._hasBFrames = true;
+            const drop = this._videoPacketBuffer[i - 1].pts - this._videoPacketBuffer[i].pts;
+            if (drop > maxPtsDrop) maxPtsDrop = drop;
+          }
+        }
+
+        // If B-frames detected, compute required PTS offset
+        // Offset = max(DTS - PTS) across all packets when DTS increments by duration
+        if (this._hasBFrames) {
+          // Compute what DTS would be for each packet if we just increment by duration
+          let simulatedDts = 0n;
+          let maxOffset = 0n;
+          for (const p of this._videoPacketBuffer) {
+            if (simulatedDts > p.pts) {
+              const offset = simulatedDts - p.pts;
+              if (offset > maxOffset) maxOffset = offset;
+            }
+            simulatedDts += p.duration > 0n ? p.duration : 1n;
+          }
+          this._videoPtsOffset = maxOffset + 1n; // Add 1 for safety margin
+        }
+
+        // Write all buffered packets
+        for (const bufferedPacket of this._videoPacketBuffer) {
+          this.writeVideoPacketInternal(
+            bufferedPacket.data,
+            bufferedPacket.pts + this._videoPtsOffset,
+            bufferedPacket.duration,
+            bufferedPacket.isKeyframe,
+            stream,
+            streamTimeBase
+          );
+        }
+        this._videoPacketBuffer = [];
+      }
+      return;
     }
+
+    // After buffer analysis, write packets directly with computed offset
+    this.writeVideoPacketInternal(
+      Buffer.from(chunk._buffer),
+      pts + this._videoPtsOffset,
+      frameDuration,
+      isKeyframe,
+      stream,
+      streamTimeBase
+    );
+  }
+
+  private writeVideoPacketInternal(
+    data: Buffer,
+    pts: bigint,
+    duration: bigint,
+    isKeyframe: boolean,
+    stream: any,
+    streamTimeBase: { num: number; den: number }
+  ): void {
+    const packet = new Packet();
+    packet.alloc();
+    packet.data = data;
+
+    // DTS must be monotonically increasing AND DTS <= PTS
+    let dts: bigint;
+    if (!this._hasBFrames) {
+      // No B-frames: DTS = PTS (handles non-zero start timestamps correctly)
+      dts = pts;
+    } else {
+      // B-frames: compute DTS by incrementing from 0
+      if (this._lastVideoDts < 0n) {
+        dts = 0n;
+      } else {
+        dts = this._lastVideoDts + (duration > 0n ? duration : 1n);
+      }
+      // Cap DTS at PTS (required for valid composition time offset)
+      if (dts > pts) {
+        dts = pts;
+      }
+    }
+    // Ensure strictly increasing
+    if (this._lastVideoDts >= 0n && dts <= this._lastVideoDts) {
+      dts = this._lastVideoDts + 1n;
+    }
+    this._lastVideoDts = dts;
+
+    packet.pts = pts;
+    packet.dts = dts;
+    packet.duration = duration;
     packet.streamIndex = this._videoStreamIndex;
-    packet.isKeyframe = chunk.type === 'key';
+    packet.isKeyframe = isKeyframe;
     packet.timeBase = streamTimeBase;
 
     const ret = (this.formatContext as any).interleavedWriteFrameSync(packet);
@@ -305,8 +418,11 @@ export class NodeAvMuxer implements IMuxer {
       return BigInt(Math.round(us * streamTimeBase.den / (1_000_000 * streamTimeBase.num)));
     };
 
-    packet.pts = usToStreamTs(chunk.timestamp);
-    packet.dts = usToStreamTs(chunk.timestamp);
+    // Audio doesn't have B-frames, so PTS = DTS
+    // Use actual chunk timestamp for both
+    const pts = usToStreamTs(chunk.timestamp);
+    packet.pts = pts;
+    packet.dts = pts;
     if (chunk.duration) {
       packet.duration = usToStreamTs(chunk.duration);
     }
@@ -314,6 +430,7 @@ export class NodeAvMuxer implements IMuxer {
     packet.isKeyframe = chunk.type === 'key';
     packet.timeBase = streamTimeBase;
 
+    // Use interleavedWriteFrameSync for proper A/V packet interleaving
     const ret = (this.formatContext as any).interleavedWriteFrameSync(packet);
     packet.free();
 
@@ -331,6 +448,46 @@ export class NodeAvMuxer implements IMuxer {
    */
   async close(timeout: number = DEFAULT_TIMEOUTS.close): Promise<void> {
     if (this.formatContext) {
+      // Flush any buffered video packets
+      if (this._videoPacketBuffer.length > 0) {
+        this._videoBufferAnalyzed = true;
+        const stream = this.formatContext.streams[this._videoStreamIndex];
+        const streamTimeBase = stream?.timeBase ?? { num: 1, den: 1000 };
+
+        // Analyze B-frames in remaining buffer
+        for (let i = 1; i < this._videoPacketBuffer.length; i++) {
+          if (this._videoPacketBuffer[i].pts < this._videoPacketBuffer[i - 1].pts) {
+            this._hasBFrames = true;
+            break;
+          }
+        }
+
+        if (this._hasBFrames) {
+          let simulatedDts = this._lastVideoDts >= 0n ? this._lastVideoDts : 0n;
+          let maxOffset = 0n;
+          for (const p of this._videoPacketBuffer) {
+            simulatedDts += p.duration > 0n ? p.duration : 1n;
+            if (simulatedDts > p.pts + this._videoPtsOffset) {
+              const offset = simulatedDts - (p.pts + this._videoPtsOffset);
+              if (offset > maxOffset) maxOffset = offset;
+            }
+          }
+          this._videoPtsOffset += maxOffset + 1n;
+        }
+
+        for (const bufferedPacket of this._videoPacketBuffer) {
+          this.writeVideoPacketInternal(
+            bufferedPacket.data,
+            bufferedPacket.pts + this._videoPtsOffset,
+            bufferedPacket.duration,
+            bufferedPacket.isKeyframe,
+            stream,
+            streamTimeBase
+          );
+        }
+        this._videoPacketBuffer = [];
+      }
+
       // Write trailer
       if (this._headerWritten) {
         const ret = this.formatContext.writeTrailerSync();

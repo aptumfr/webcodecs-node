@@ -16,7 +16,7 @@ This package provides a Node.js-compatible implementation of the [WebCodecs API]
 - **Streaming Support** - Real-time frame-by-frame encoding/decoding
 - **Latency Modes** - Configure for real-time streaming vs maximum compression
 - **Bitrate Modes** - Constant, variable, and quantizer (CRF) encoding modes
-- **Alpha Channel** - Preserve transparency with VP9 and AV1 codecs
+- **Alpha Channel** - Preserve transparency with VP9 codec (software encoding only)
 - **10-bit & HDR** - I420P10, P010 formats with HDR10 metadata support
 - **Container Support** - MP4, WebM demuxing/muxing utilities
 
@@ -553,9 +553,11 @@ console.log(colorSpace.hasHdrMetadata); // true
 
 **10-bit pixel formats:**
 - `I420P10` - YUV 4:2:0 planar, 10-bit
-- `I422P10` - YUV 4:2:2 planar, 10-bit
-- `I444P10` - YUV 4:4:4 planar, 10-bit
+- `I422P10` - YUV 4:2:2 planar, 10-bit (downconverted to 4:2:0 during encoding)
+- `I444P10` - YUV 4:4:4 planar, 10-bit (downconverted to 4:2:0 during encoding)
 - `P010` - YUV 4:2:0 semi-planar, 10-bit
+
+> **Note:** 10-bit encoding is supported for HEVC, VP9, and AV1 codecs only. I422P10 and I444P10 formats preserve chroma resolution for decoding but are currently downconverted to I420P10 during encoding (chroma subsampling reduction). H.264 does not support 10-bit encoding and will downconvert to 8-bit.
 
 **Pixel format utilities:**
 - `is10BitFormat(format)` - Check if format is 10-bit
@@ -835,7 +837,7 @@ This implementation follows the [WebCodecs specification](https://www.w3.org/TR/
 | Hardware Acceleration | Auto | Opt-in |
 | latencyMode | ✓ | ✓ |
 | bitrateMode | ✓ | ✓ |
-| alpha (transparency) | ✓ | ✓ (VP9, AV1) |
+| alpha (transparency) | ✓ | ✓ (VP9 only) |
 | isConfigSupported() | ✓ | ✓ |
 
 ## Architecture

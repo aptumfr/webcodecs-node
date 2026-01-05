@@ -17,6 +17,10 @@ import {
   AV_PIX_FMT_YUV422P,
   AV_PIX_FMT_YUV444P,
   AV_PIX_FMT_YUVA420P,
+  AV_PIX_FMT_YUV420P10LE,
+  AV_PIX_FMT_YUV422P10LE,
+  AV_PIX_FMT_YUV444P10LE,
+  AV_PIX_FMT_P010LE,
   type AVPixelFormat,
   type FFEncoderCodec,
   AV_PKT_FLAG_KEY,
@@ -61,6 +65,10 @@ function pixelFormatName(fmt: AVPixelFormat): string {
     case AV_PIX_FMT_NV12: return 'nv12';
     case AV_PIX_FMT_RGBA: return 'rgba';
     case AV_PIX_FMT_BGRA: return 'bgra';
+    case AV_PIX_FMT_YUV420P10LE: return 'yuv420p10le';
+    case AV_PIX_FMT_YUV422P10LE: return 'yuv422p10le';
+    case AV_PIX_FMT_YUV444P10LE: return 'yuv444p10le';
+    case AV_PIX_FMT_P010LE: return 'p010le';
     default: return 'unknown';
   }
 }
@@ -89,6 +97,22 @@ function mapPixelFormat(format: string): AVPixelFormat {
       return AV_PIX_FMT_BGRA;
     case 'RGBA':
       return AV_PIX_FMT_RGBA;
+    // 10-bit formats
+    case 'I420P10':
+    case 'YUV420P10LE':
+    case 'YUV420P10':
+      return AV_PIX_FMT_YUV420P10LE;
+    case 'I422P10':
+    case 'YUV422P10LE':
+    case 'YUV422P10':
+      return AV_PIX_FMT_YUV422P10LE;
+    case 'I444P10':
+    case 'YUV444P10LE':
+    case 'YUV444P10':
+      return AV_PIX_FMT_YUV444P10LE;
+    case 'P010':
+    case 'P010LE':
+      return AV_PIX_FMT_P010LE;
     default:
       return AV_PIX_FMT_YUV420P;
   }
@@ -117,7 +141,7 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
   private filter: FilterAPI | null = null;
   private config: VideoEncoderBackendConfig | null = null;
   private frameIndex = 0;
-  private queue: Array<{ buffer?: Buffer; frame?: Frame; owned?: boolean }> = [];
+  private queue: Array<{ buffer?: Buffer; frame?: Frame; owned?: boolean; timestamp: number }> = [];
   private processing = false;
   private processingPromise: Promise<void> | null = null;
   private shuttingDown = false;
@@ -136,28 +160,34 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
 
   startEncoder(config: VideoEncoderBackendConfig): void {
     this.config = { ...config };
-    const framerate = config.framerate ?? DEFAULT_FRAMERATE;
-    this.timeBase = new Rational(1, framerate);
+    // Use microsecond timebase to preserve input timestamps exactly
+    this.timeBase = new Rational(1, 1_000_000);
     this.inputPixelFormat = mapPixelFormat(config.inputPixelFormat || 'yuv420p');
     this.outputFormat = config.format ?? 'mp4'; // Default to MP4/AVCC format
+
+    // Log HDR metadata presence - full wiring to FFmpeg codec context requires node-av API additions
+    if (config.colorSpace?.hdrMetadata) {
+      logger.info(`HDR metadata provided (primaries=${config.colorSpace.primaries}, transfer=${config.colorSpace.transfer})`);
+      logger.warn('HDR side data (mastering display, content light level) not yet wired to encoder context');
+    }
   }
 
-  write(data: Buffer | Uint8Array): boolean {
+  write(data: Buffer | Uint8Array, timestamp?: number): boolean {
     if (!this.config || this.shuttingDown) {
       return false;
     }
 
-    this.queue.push({ buffer: Buffer.from(data), owned: true });
+    this.queue.push({ buffer: Buffer.from(data), owned: true, timestamp: timestamp ?? 0 });
     void this.processQueue();
     return true;
   }
 
-  writeFrame(frame: Frame): boolean {
+  writeFrame(frame: Frame, timestamp?: number): boolean {
     if (!this.config || this.shuttingDown) {
       return false;
     }
 
-    this.queue.push({ frame, owned: false });
+    this.queue.push({ frame, owned: false, timestamp: timestamp ?? 0 });
     void this.processQueue();
     return true;
   }
@@ -198,9 +228,9 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
           // Use setImmediate to ensure emit happens after write() returns
           setImmediate(() => this.emit('frameAccepted'));
           if (item.frame) {
-            await this.encodeFrame(item.frame, item.owned ?? true);
+            await this.encodeFrame(item.frame, item.owned ?? true, item.timestamp);
           } else if (item.buffer) {
-            await this.encodeBuffer(item.buffer);
+            await this.encodeBuffer(item.buffer, item.timestamp);
           }
         }
       } catch (err) {
@@ -225,10 +255,16 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     const framerate = this.config.framerate ?? DEFAULT_FRAMERATE;
     const gopSize = Math.max(1, framerate);
 
+    // SVT-AV1 derives framerate from timebase, so we must use framerate-based timebase
+    // instead of microseconds to avoid "maximum allowed frame rate is 240 fps" error
+    if (codecName === 'av1') {
+      this.timeBase = new Rational(1, framerate);
+    }
+
     const { encoderCodec, isHardware } = await this.selectEncoderCodec(codecName);
     const options = this.buildEncoderOptions(codecName, framerate, gopSize);
 
-    this.configurePixelFormat(isHardware, options);
+    this.configurePixelFormat(isHardware, options, codecName);
 
     logger.debug(`Encoder options: ${JSON.stringify(options.options)}`);
 
@@ -255,21 +291,92 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
 
   private configurePixelFormat(
     isHardware: boolean,
-    options: Record<string, any>
+    options: Record<string, any>,
+    codecName: string
   ): void {
-    if (isHardware) {
+    // Check if input has alpha and user wants to keep it
+    const inputHasAlpha = this.inputPixelFormat === AV_PIX_FMT_YUVA420P ||
+                          this.inputPixelFormat === AV_PIX_FMT_RGBA ||
+                          this.inputPixelFormat === AV_PIX_FMT_BGRA;
+    const keepAlpha = this.config?.alpha === 'keep' && inputHasAlpha;
+
+    // Check if input is 10-bit
+    const inputIs10Bit = this.inputPixelFormat === AV_PIX_FMT_YUV420P10LE ||
+                         this.inputPixelFormat === AV_PIX_FMT_YUV422P10LE ||
+                         this.inputPixelFormat === AV_PIX_FMT_YUV444P10LE ||
+                         this.inputPixelFormat === AV_PIX_FMT_P010LE;
+
+    // Only VP9 supports alpha encoding (via YUVA420P) in software
+    // libsvtav1 doesn't support alpha pixel formats
+    // Hardware encoders don't support alpha
+    const codecSupportsAlpha = codecName === 'vp9' && !isHardware;
+
+    // HEVC, VP9 and AV1 support 10-bit encoding
+    const codecSupports10Bit = codecName === 'hevc' || codecName === 'vp9' || codecName === 'av1';
+
+    if (keepAlpha && codecSupportsAlpha) {
+      this.encoderPixelFormat = AV_PIX_FMT_YUVA420P;
+      options.pixelFormat = AV_PIX_FMT_YUVA420P;
+      logger.debug(`Alpha channel will be preserved (codec: ${codecName})`);
+    } else if (inputIs10Bit && codecSupports10Bit && !isHardware) {
+      // Use 10-bit encoding for software encoders
+      // Note: Currently all 10-bit inputs (I422P10, I444P10) are downconverted to 4:2:0
+      // because most software encoders default to 4:2:0 chroma subsampling
+      this.encoderPixelFormat = AV_PIX_FMT_YUV420P10LE;
+      options.pixelFormat = AV_PIX_FMT_YUV420P10LE;
+      logger.debug(`10-bit encoding enabled (codec: ${codecName})`);
+
+      // Warn if chroma subsampling is being changed (422/444 → 420)
+      if (this.inputPixelFormat === AV_PIX_FMT_YUV422P10LE) {
+        logger.warn(`10-bit 4:2:2 (I422P10) input will be downconverted to 4:2:0 (I420P10) - chroma resolution reduced`);
+      } else if (this.inputPixelFormat === AV_PIX_FMT_YUV444P10LE) {
+        logger.warn(`10-bit 4:4:4 (I444P10) input will be downconverted to 4:2:0 (I420P10) - chroma resolution reduced`);
+      }
+
+      if (keepAlpha) {
+        logger.warn(`Alpha requested with 10-bit input but 10-bit alpha not supported - discarding alpha`);
+      }
+    } else if (inputIs10Bit && isHardware) {
+      // Hardware 10-bit: use P010 (semi-planar 10-bit)
+      this.encoderPixelFormat = AV_PIX_FMT_P010LE;
+      options.pixelFormat = AV_PIX_FMT_P010LE;
+      logger.debug(`Hardware 10-bit encoding using P010`);
+      if (keepAlpha) {
+        logger.warn(`Alpha requested but hardware encoders don't support alpha - discarding`);
+      }
+    } else if (isHardware) {
       this.encoderPixelFormat = AV_PIX_FMT_NV12;
       options.pixelFormat = AV_PIX_FMT_NV12;
+      if (keepAlpha) {
+        logger.warn(`Alpha requested but hardware encoders don't support alpha - discarding`);
+      }
     } else {
       this.encoderPixelFormat = AV_PIX_FMT_YUV420P;
       options.pixelFormat = AV_PIX_FMT_YUV420P;
+      if (keepAlpha) {
+        logger.warn(`Alpha requested but ${codecName} doesn't support alpha - discarding`);
+      }
+      if (inputIs10Bit) {
+        logger.warn(`10-bit input but ${codecName} doesn't support 10-bit - downconverting to 8-bit`);
+      }
     }
 
     // Check if format conversion is needed
     this.needsFormatConversion = this.inputPixelFormat !== this.encoderPixelFormat;
 
     if (this.needsFormatConversion) {
-      const targetFormat = this.encoderPixelFormat === AV_PIX_FMT_NV12 ? 'nv12' : 'yuv420p';
+      let targetFormat: string;
+      if (this.encoderPixelFormat === AV_PIX_FMT_NV12) {
+        targetFormat = 'nv12';
+      } else if (this.encoderPixelFormat === AV_PIX_FMT_YUVA420P) {
+        targetFormat = 'yuva420p';
+      } else if (this.encoderPixelFormat === AV_PIX_FMT_YUV420P10LE) {
+        targetFormat = 'yuv420p10le';
+      } else if (this.encoderPixelFormat === AV_PIX_FMT_P010LE) {
+        targetFormat = 'p010le';
+      } else {
+        targetFormat = 'yuv420p';
+      }
 
       // Try GPU-accelerated filter if hardware context is available
       if (this.hardware) {
@@ -478,14 +585,18 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     }
   }
 
-  private async encodeBuffer(buffer: Buffer): Promise<void> {
+  private async encodeBuffer(buffer: Buffer, timestamp: number): Promise<void> {
     await this.ensureEncoder();
     if (!this.encoder || !this.config) {
       throw new Error('Encoder not initialized');
     }
 
     const frame = await this.createFrame(buffer, true);
-    frame.pts = BigInt(this.frameIndex);
+    // Convert input timestamp (microseconds) to encoder timebase
+    // For most codecs, timebase is 1/1000000 so pts = timestamp
+    // For AV1/SVT-AV1, timebase is 1/framerate so pts = timestamp * framerate / 1000000
+    const pts = BigInt(Math.round(timestamp * this.timeBase.den / 1_000_000));
+    frame.pts = pts;
 
     await this.encoder.encode(frame);
     frame.unref();
@@ -494,14 +605,16 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     this.frameIndex++;
   }
 
-  private async encodeFrame(inputFrame: Frame, owned: boolean): Promise<void> {
+  private async encodeFrame(inputFrame: Frame, owned: boolean, timestamp: number): Promise<void> {
     await this.ensureEncoder();
     if (!this.encoder || !this.config) {
       throw new Error('Encoder not initialized');
     }
 
     const frame = await this.createFrame(inputFrame, owned);
-    frame.pts = BigInt(this.frameIndex);
+    // Convert input timestamp (microseconds) to encoder timebase
+    const pts = BigInt(Math.round(timestamp * this.timeBase.den / 1_000_000));
+    frame.pts = pts;
 
     await this.encoder.encode(frame);
     if (owned || frame !== inputFrame) {
@@ -549,7 +662,8 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
 
       // Close failed filter and create CPU fallback
       this.filter.close();
-      const targetFormat = this.encoderPixelFormat === AV_PIX_FMT_NV12 ? 'nv12' : 'yuv420p';
+      const targetFormat = this.encoderPixelFormat === AV_PIX_FMT_NV12 ? 'nv12' :
+                          this.encoderPixelFormat === AV_PIX_FMT_YUVA420P ? 'yuva420p' : 'yuv420p';
       this.filter = FilterAPI.create(`format=${targetFormat}`);
       logger.debug(`Created CPU fallback filter: format=${targetFormat}`);
 
@@ -582,7 +696,14 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     let packet = await this.encoder.receive();
     while (packet) {
       if (packet.data) {
-        const timestamp = packet.pts !== undefined ? Number(packet.pts) : this.frameIndex;
+        // Convert packet PTS from packet's timebase to microseconds
+        // timestamp_us = pts * (timeBase.num / timeBase.den) * 1_000_000
+        let timestamp = this.frameIndex;
+        if (packet.pts !== undefined) {
+          const tb = packet.timeBase;
+          const ptsUs = (packet.pts * BigInt(tb.num) * 1_000_000n) / BigInt(tb.den);
+          timestamp = Number(ptsUs);
+        }
         const keyFrame = (packet.flags & AV_PKT_FLAG_KEY) === AV_PKT_FLAG_KEY || packet.isKeyframe;
 
         // For H.264/HEVC, extract parameter sets from first keyframe and build description

@@ -34,6 +34,13 @@ export class EncodedVideoChunk {
       throw new TypeError('data is required');
     }
 
+    // Validate duration per WebCodecs spec (EnforceRange behavior)
+    if (init.duration !== undefined) {
+      if (typeof init.duration !== 'number' || !Number.isFinite(init.duration) || init.duration < 0) {
+        throw new TypeError('duration must be a non-negative finite number');
+      }
+    }
+
     this.type = init.type;
     this.timestamp = init.timestamp;
     this.duration = init.duration ?? null;

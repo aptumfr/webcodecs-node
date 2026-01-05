@@ -26,6 +26,10 @@ import {
   AV_PIX_FMT_YUV422P,
   AV_PIX_FMT_YUV444P,
   AV_PIX_FMT_YUVA420P,
+  AV_PIX_FMT_YUV420P10LE,
+  AV_PIX_FMT_YUV422P10LE,
+  AV_PIX_FMT_YUV444P10LE,
+  AV_PIX_FMT_P010LE,
   type AVCodecID,
   type AVPixelFormat,
 } from 'node-av/constants';
@@ -59,15 +63,19 @@ export class NodeAvVideoDecoder extends EventEmitter implements VideoDecoderBack
   private stream: Stream | null = null;
   private filter: FilterAPI | null = null;
   private config: VideoDecoderBackendConfig | null = null;
-  private queue: Buffer[] = [];
+  private queue: Array<{ data: Buffer; timestamp: number; duration: number }> = [];
   private processing = false;
   private processingPromise: Promise<void> | null = null;
   private shuttingDown = false;
   private packetIndex = 0;
-  private packetTimeBase: Rational = new Rational(1, DEFAULT_FRAMERATE);
+  // Use microsecond timebase to preserve input timestamps exactly
+  private packetTimeBase: Rational = new Rational(1, 1_000_000);
   private outputPixelFormat: AVPixelFormat = AV_PIX_FMT_YUV420P;
   private filterDescription: string | null = null;
   private hardwarePreference: 'no-preference' | 'prefer-hardware' | 'prefer-software' = 'no-preference';
+  // Track input timestamps - sorted by presentation order (ascending)
+  // Used to recover timestamps since node-av decoder doesn't preserve packet PTS
+  private pendingTimestamps: number[] = [];
 
   get isHealthy(): boolean {
     return !this.shuttingDown;
@@ -75,17 +83,26 @@ export class NodeAvVideoDecoder extends EventEmitter implements VideoDecoderBack
 
   startDecoder(config: VideoDecoderBackendConfig): void {
     this.config = { ...config };
-    const framerate = config.framerate ?? DEFAULT_FRAMERATE;
-    this.packetTimeBase = new Rational(1, framerate);
+    // Use microsecond timebase for timestamp preservation (set in constructor)
     this.outputPixelFormat = mapPixelFormat(config.outputPixelFormat ?? 'yuv420p');
     this.hardwarePreference = config.hardwareAcceleration ?? 'no-preference';
   }
 
-  write(data: Buffer | Uint8Array): boolean {
+  write(data: Buffer | Uint8Array, timestamp?: number, duration?: number): boolean {
     if (!this.config || this.shuttingDown) {
       return false;
     }
-    this.queue.push(Buffer.from(data));
+    const ts = timestamp ?? 0;
+    this.queue.push({ data: Buffer.from(data), timestamp: ts, duration: duration ?? 0 });
+    // Insert timestamp into sorted pending list (ascending order = display order)
+    // Binary search to find insertion point
+    let lo = 0, hi = this.pendingTimestamps.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.pendingTimestamps[mid] < ts) lo = mid + 1;
+      else hi = mid;
+    }
+    this.pendingTimestamps.splice(lo, 0, ts);
     void this.processQueue();
     return true;
   }
@@ -117,11 +134,11 @@ export class NodeAvVideoDecoder extends EventEmitter implements VideoDecoderBack
 
       try {
         while (this.queue.length > 0) {
-          const data = this.queue.shift()!;
+          const item = this.queue.shift()!;
           // Emit chunkAccepted when chunk starts processing (for dequeue event)
           // Use setImmediate to ensure emit happens after write() returns
           setImmediate(() => this.emit('chunkAccepted'));
-          await this.decodeBuffer(data);
+          await this.decodeBuffer(item.data, item.timestamp, item.duration);
         }
       } catch (err) {
         this.emit('error', err instanceof Error ? err : new Error(String(err)));
@@ -153,8 +170,9 @@ export class NodeAvVideoDecoder extends EventEmitter implements VideoDecoderBack
     const params = this.stream.codecpar;
     params.codecType = AVMEDIA_TYPE_VIDEO;
     params.codecId = codecId;
-    params.width = this.config.width;
-    params.height = this.config.height;
+    // Width/height can be 0 for size-less configs - FFmpeg will determine from bitstream
+    params.width = this.config.width ?? 0;
+    params.height = this.config.height ?? 0;
     if (this.config.description) {
       params.extradata = Buffer.from(this.config.description);
     }
@@ -190,7 +208,7 @@ export class NodeAvVideoDecoder extends EventEmitter implements VideoDecoderBack
     }
   }
 
-  private async decodeBuffer(buffer: Buffer): Promise<void> {
+  private async decodeBuffer(buffer: Buffer, timestamp: number, duration: number): Promise<void> {
     await this.ensureDecoder();
     if (!this.decoder || !this.stream) {
       throw new Error('Decoder not initialized');
@@ -199,11 +217,13 @@ export class NodeAvVideoDecoder extends EventEmitter implements VideoDecoderBack
     const packet = new Packet();
     packet.alloc();
     packet.streamIndex = this.stream.index;
-    packet.pts = BigInt(this.packetIndex);
-    packet.dts = BigInt(this.packetIndex);
+    // Use input timestamp as PTS (in microseconds, matching our timebase)
+    packet.pts = BigInt(Math.round(timestamp));
+    packet.dts = BigInt(Math.round(timestamp));
     packet.timeBase = this.packetTimeBase;
     packet.data = buffer;
-    packet.duration = 1n;
+    // Use actual duration from chunk (in microseconds), fallback to 1 if not provided
+    packet.duration = duration > 0 ? BigInt(Math.round(duration)) : 1n;
     if (this.packetIndex === 0) {
       // Cast to any to handle strict type checking on flags
       (packet as any).flags |= AV_PKT_FLAG_KEY;
@@ -223,14 +243,18 @@ export class NodeAvVideoDecoder extends EventEmitter implements VideoDecoderBack
       if (frame === undefined) {
         break;
       }
+      // The node-av decoder doesn't preserve packet PTS in output frames.
+      // Frames come out in display order (lowest PTS first), so we pop
+      // from our sorted timestamp list to recover the original timestamp.
+      const timestamp = this.pendingTimestamps.shift() ?? 0;
       const output = await this.toOutput(frame);
       if (!output.nativeFrame) {
         frame.unref();
       }
       if (output.buffer) {
-        this.emit('frame', output.buffer);
+        this.emit('frame', { buffer: output.buffer, timestamp });
       } else if (output.nativeFrame) {
-        this.emit('frame', { nativeFrame: output.nativeFrame, format: this.outputPixelFormat });
+        this.emit('frame', { nativeFrame: output.nativeFrame, format: this.outputPixelFormat, timestamp });
       }
       frame = await this.decoder.receive();
     }
@@ -351,6 +375,7 @@ export class NodeAvVideoDecoder extends EventEmitter implements VideoDecoderBack
     this.formatContext = null;
     this.stream = null;
     this.queue = [];
+    this.pendingTimestamps = [];
   }
 }
 
@@ -397,6 +422,22 @@ function mapPixelFormat(format: string): AVPixelFormat {
       return AV_PIX_FMT_RGBA;
     case 'RGBX':
       return AV_PIX_FMT_RGB0;
+    // 10-bit formats
+    case 'I420P10':
+    case 'YUV420P10LE':
+    case 'YUV420P10':
+      return AV_PIX_FMT_YUV420P10LE;
+    case 'I422P10':
+    case 'YUV422P10LE':
+    case 'YUV422P10':
+      return AV_PIX_FMT_YUV422P10LE;
+    case 'I444P10':
+    case 'YUV444P10LE':
+    case 'YUV444P10':
+      return AV_PIX_FMT_YUV444P10LE;
+    case 'P010':
+    case 'P010LE':
+      return AV_PIX_FMT_P010LE;
     default:
       return AV_PIX_FMT_YUV420P;
   }
@@ -420,6 +461,15 @@ function pixelFormatToFFmpegName(fmt: AVPixelFormat): string {
       return 'yuv444p';
     case AV_PIX_FMT_YUVA420P:
       return 'yuva420p';
+    // 10-bit formats
+    case AV_PIX_FMT_YUV420P10LE:
+      return 'yuv420p10le';
+    case AV_PIX_FMT_YUV422P10LE:
+      return 'yuv422p10le';
+    case AV_PIX_FMT_YUV444P10LE:
+      return 'yuv444p10le';
+    case AV_PIX_FMT_P010LE:
+      return 'p010le';
     case AV_PIX_FMT_YUV420P:
     default:
       return 'yuv420p';

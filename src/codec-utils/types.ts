@@ -69,7 +69,7 @@ export type BitrateMode = 'constant' | 'variable' | 'quantizer';
 /**
  * Alpha channel handling mode
  * - 'discard': Drop alpha channel (default, works with all codecs)
- * - 'keep': Preserve alpha channel (only VP9 and AV1 support this)
+ * - 'keep': Preserve alpha channel (only VP9 software encoding supports this)
  */
 export type AlphaOption = 'discard' | 'keep';
 

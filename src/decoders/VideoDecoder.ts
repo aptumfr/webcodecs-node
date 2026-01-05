@@ -21,7 +21,7 @@ import type { AvcConfig } from '../utils/avc.js';
 import { convertAvccToAnnexB, parseAvcDecoderConfig } from '../utils/avc.js';
 import type { HvccConfig } from '../utils/hevc.js';
 import { convertHvccToAnnexB, parseHvccDecoderConfig } from '../utils/hevc.js';
-import { getCodecBase } from '../utils/codec-cache.js';
+import { getCodecBase, parseCodec } from '../utils/codec-cache.js';
 import { encodingError, wrapAsWebCodecsError } from '../utils/errors.js';
 import { validateVideoDecoderConfig, validateVideoCodec } from '../utils/codec-validation.js';
 
@@ -95,7 +95,9 @@ export class VideoDecoder extends WebCodecsEventTarget {
   private _decoder: NodeAvVideoDecoder | null = null;
   private _frameTimestamp = 0;
   private _frameDuration = 0;
-  private _pendingChunks: { timestamp: number; duration: number | null }[] = [];
+  // Map of timestamp -> chunk info array for B-frame reordering support
+  // Uses array to handle multiple chunks with same timestamp
+  private _pendingChunks = new Map<number, Array<{ duration: number | null }>>();
   private _outputFormat: VideoPixelFormat = 'I420';
   private _avcConfig: AvcConfig | null = null;
   private _hevcConfig: HvccConfig | null = null;
@@ -161,7 +163,36 @@ export class VideoDecoder extends WebCodecsEventTarget {
 
     // Validate codec string format and check if supported
     const codecValidation = validateVideoCodec(config.codec);
-    return { supported: codecValidation.supported, config };
+    if (!codecValidation.supported) {
+      return { supported: false, config };
+    }
+
+    // Check outputFormat compatibility
+    if (config.outputFormat) {
+      // Validate the requested output format is supported
+      if (!SUPPORTED_OUTPUT_FORMATS.includes(config.outputFormat)) {
+        return { supported: false, config };
+      }
+
+      // Some formats have codec-specific limitations
+      const parsed = parseCodec(config.codec);
+
+      // 10-bit output formats require codecs that support 10-bit decoding
+      const is10BitFormat = config.outputFormat === 'I420P10' ||
+        config.outputFormat === 'I422P10' ||
+        config.outputFormat === 'I444P10' ||
+        config.outputFormat === 'P010';
+
+      if (is10BitFormat) {
+        // Only HEVC, VP9, and AV1 support 10-bit content
+        const supports10Bit = parsed.name === 'hevc' || parsed.name === 'vp9' || parsed.name === 'av1';
+        if (!supports10Bit) {
+          return { supported: false, config };
+        }
+      }
+    }
+
+    return { supported: true, config };
   }
 
   configure(config: VideoDecoderConfig): void {
@@ -199,7 +230,7 @@ export class VideoDecoder extends WebCodecsEventTarget {
     this._config = { ...config };
     this._outputFormat = config.outputFormat ?? 'I420';
     this._state = 'configured';
-    this._pendingChunks = [];
+    this._pendingChunks.clear();
     this._codecBase = getCodecBase(config.codec); // Cache for decode() hot path
     this._avcConfig = this._parseAvcDescription(config);
     this._hevcConfig = this._parseHevcDescription(config);
@@ -214,9 +245,12 @@ export class VideoDecoder extends WebCodecsEventTarget {
       this._maxQueueSize = DEFAULT_MAX_QUEUE_SIZE;
     }
 
+    // Start decoder immediately if dimensions are known, otherwise defer to first decode()
+    // WebCodecs spec allows size-less configs where dimensions come from the bitstream
     if (config.codedWidth && config.codedHeight) {
       this._startDecoder();
     }
+    // If no dimensions, decoder will be started on first decode() call
   }
 
   decode(chunk: EncodedVideoChunk): void {
@@ -236,12 +270,13 @@ export class VideoDecoder extends WebCodecsEventTarget {
       throw new TypeError('chunk must be an EncodedVideoChunk');
     }
 
+    // Start decoder on first decode if not already started (size-less config case)
+    if (!this._decoder) {
+      this._startDecoder();
+    }
+
     if (!this._decoder?.isHealthy) {
-      if (!this._decoder) {
-        this._safeErrorCallback(encodingError('Decoder not fully initialized - missing dimensions'));
-      } else {
-        this._safeErrorCallback(encodingError('Decoder process is not healthy'));
-      }
+      this._safeErrorCallback(encodingError('Decoder process is not healthy'));
       return;
     }
 
@@ -256,10 +291,15 @@ export class VideoDecoder extends WebCodecsEventTarget {
 
     this._decodeQueueSize++;
 
-    this._pendingChunks.push({
-      timestamp: chunk.timestamp,
-      duration: chunk.duration,
-    });
+    // Store chunk info keyed by timestamp for B-frame reordering support
+    // Append to array to handle multiple chunks with same timestamp
+    const existing = this._pendingChunks.get(chunk.timestamp);
+    const chunkInfo = { duration: chunk.duration };
+    if (existing) {
+      existing.push(chunkInfo);
+    } else {
+      this._pendingChunks.set(chunk.timestamp, [chunkInfo]);
+    }
 
     let dataToWrite: Buffer | Uint8Array = chunk._buffer;
 
@@ -275,11 +315,19 @@ export class VideoDecoder extends WebCodecsEventTarget {
     }
 
     const bufferData = Buffer.isBuffer(dataToWrite) ? dataToWrite : Buffer.from(dataToWrite);
-    const writeSuccess = this._decoder.write(bufferData);
+    // Pass timestamp and duration to backend for proper PTS handling
+    const writeSuccess = this._decoder.write(bufferData, chunk.timestamp, chunk.duration ?? undefined);
 
     if (!writeSuccess) {
       this._decodeQueueSize = Math.max(0, this._decodeQueueSize - 1);
-      this._pendingChunks.pop();
+      // Remove the chunk info we just added
+      const arr = this._pendingChunks.get(chunk.timestamp);
+      if (arr) {
+        arr.pop(); // Remove the last added entry
+        if (arr.length === 0) {
+          this._pendingChunks.delete(chunk.timestamp);
+        }
+      }
       this._safeErrorCallback(encodingError('Failed to write chunk data to decoder'));
     }
   }
@@ -315,7 +363,7 @@ export class VideoDecoder extends WebCodecsEventTarget {
         resolved = true;
         cleanup();
         this._decodeQueueSize = 0;
-        this._pendingChunks = [];
+        this._pendingChunks.clear();
         this._decoder = null;
         this._flushPromise = null;
         if (this._config?.codedWidth && this._config?.codedHeight) {
@@ -353,7 +401,7 @@ export class VideoDecoder extends WebCodecsEventTarget {
     this._state = 'unconfigured';
     this._config = null;
     this._decodeQueueSize = 0;
-    this._pendingChunks = [];
+    this._pendingChunks.clear();
     this._avcConfig = null;
     this._hevcConfig = null;
     this._flushPromise = null;
@@ -366,14 +414,16 @@ export class VideoDecoder extends WebCodecsEventTarget {
     this._state = 'closed';
     this._config = null;
     this._decodeQueueSize = 0;
-    this._pendingChunks = [];
+    this._pendingChunks.clear();
     this._avcConfig = null;
     this._hevcConfig = null;
     this._flushPromise = null;
   }
 
   private _startDecoder(): void {
-    if (!this._config?.codedWidth || !this._config?.codedHeight) return;
+    // Allow decoder to start even without dimensions - FFmpeg can parse them from the stream
+    // This supports the WebCodecs pattern of configuring without dimensions
+    if (!this._config) return;
 
     const pixFmt = pixelFormatToFFmpeg(this._outputFormat);
 
@@ -385,17 +435,18 @@ export class VideoDecoder extends WebCodecsEventTarget {
 
     this._decoder = new NodeAvVideoDecoder();
 
+    // Pass 0 for dimensions if not configured - FFmpeg will parse from stream/extradata
     this._decoder.startDecoder({
       codec: this._config.codec,
-      width: this._config.codedWidth,
-      height: this._config.codedHeight,
+      width: this._config.codedWidth ?? 0,
+      height: this._config.codedHeight ?? 0,
       framerate: this._config.optimizeForLatency ? 60 : 30,
       outputPixelFormat: pixFmt,
       description: description ?? undefined,
       hardwareAcceleration: this._hardwarePreference,
     });
 
-    this._decoder.on('frame', (data: Buffer | { nativeFrame: NativeFrame }) => {
+    this._decoder.on('frame', (data: { buffer?: Buffer; nativeFrame?: NativeFrame; timestamp: number }) => {
       this._handleDecodedFrame(data);
     });
 
@@ -467,36 +518,83 @@ export class VideoDecoder extends WebCodecsEventTarget {
     }
   }
 
-  private _handleDecodedFrame(data: Buffer | { nativeFrame: NativeFrame }): void {
+  private _handleDecodedFrame(data: { buffer?: Buffer; nativeFrame?: NativeFrame; timestamp: number }): void {
     if (!this._config) return;
 
-    const chunkInfo = this._pendingChunks.shift();
-    const timestamp = chunkInfo?.timestamp ?? this._frameTimestamp;
+    // Use the timestamp from the decoded frame (which preserves input timestamp through PTS)
+    // This handles B-frame reordering correctly since we look up by timestamp, not FIFO
+    const timestamp = data.timestamp;
+    const chunkInfoArray = this._pendingChunks.get(timestamp);
+    // Shift from array to get the first chunk with this timestamp (FIFO within same timestamp)
+    const chunkInfo = chunkInfoArray?.shift();
     const duration = chunkInfo?.duration ?? this._frameDuration;
 
-    const isNative = typeof data === 'object' && 'nativeFrame' in data;
+    // Clean up the map entry if array is now empty
+    if (chunkInfoArray && chunkInfoArray.length === 0) {
+      this._pendingChunks.delete(timestamp);
+    }
+
+    const isNative = data.nativeFrame !== undefined;
+
+    // For native frames, extract dimensions from the frame itself for size-less configs
+    // For buffer frames, we need config dimensions (or the frame would be malformed).
+    let codedWidth = this._config.codedWidth;
+    let codedHeight = this._config.codedHeight;
+
+    if (isNative) {
+      // Extract dimensions from native frame (node-av Frame has width/height properties)
+      const nativeWidth = (data.nativeFrame as any).width;
+      const nativeHeight = (data.nativeFrame as any).height;
+      if (nativeWidth > 0 && nativeHeight > 0) {
+        codedWidth = nativeWidth;
+        codedHeight = nativeHeight;
+        // Update config for subsequent frames if dimensions were missing
+        if (!this._config.codedWidth || !this._config.codedHeight) {
+          this._config = { ...this._config, codedWidth, codedHeight };
+          // Update max queue size now that we know dimensions
+          this._maxQueueSize = this._config.maxQueueSize ?? calculateMaxQueueSize(codedWidth!, codedHeight!);
+        }
+      }
+    }
+
+    if (!isNative && (!codedWidth || !codedHeight)) {
+      this._safeErrorCallback(
+        new DOMException('Cannot create VideoFrame from buffer without configured dimensions', 'InvalidStateError')
+      );
+      return;
+    }
+
+    // Map displayAspectWidth/Height from config to displayWidth/Height for VideoFrame
+    const displayWidth = this._config.displayAspectWidth;
+    const displayHeight = this._config.displayAspectHeight;
+
     const frame = isNative
-      ? new VideoFrame(data.nativeFrame, {
+      ? new VideoFrame(data.nativeFrame!, {
         format: this._outputFormat,
-        codedWidth: this._config.codedWidth!,
-        codedHeight: this._config.codedHeight!,
+        codedWidth: codedWidth!,
+        codedHeight: codedHeight!,
+        displayWidth,
+        displayHeight,
         timestamp,
         duration: duration ?? undefined,
         colorSpace: this._config.colorSpace,
         _nativeCleanup: () => {
           try {
-            if (hasUnref(data.nativeFrame)) {
-              data.nativeFrame.unref();
+            const nf = data.nativeFrame;
+            if (nf && hasUnref(nf)) {
+              nf.unref();
             }
           } catch {
             // ignore cleanup errors
           }
         },
-      } as { format: VideoPixelFormat; codedWidth: number; codedHeight: number; timestamp: number; duration?: number; colorSpace?: VideoColorSpaceInit; _nativeCleanup?: () => void })
-      : new VideoFrame(data as Buffer, {
+      } as { format: VideoPixelFormat; codedWidth: number; codedHeight: number; displayWidth?: number; displayHeight?: number; timestamp: number; duration?: number; colorSpace?: VideoColorSpaceInit; _nativeCleanup?: () => void })
+      : new VideoFrame(data.buffer!, {
         format: this._outputFormat,
         codedWidth: this._config.codedWidth!,
         codedHeight: this._config.codedHeight!,
+        displayWidth,
+        displayHeight,
         timestamp,
         duration: duration ?? undefined,
         colorSpace: this._config.colorSpace,

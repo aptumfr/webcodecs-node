@@ -63,13 +63,14 @@ export class NodeAvAudioDecoder extends EventEmitter implements AudioDecoderBack
   private stream: Stream | null = null;
   private filter: FilterAPI | null = null;
   private config: AudioDecoderBackendConfig | null = null;
-  private queue: Buffer[] = [];
+  private queue: Array<{ buffer: Buffer; timestamp: number }> = [];
   private processing = false;
   private processingPromise: Promise<void> | null = null;
   private shuttingDown = false;
   private packetIndex = 0;
   private frameIndex = 0;
-  private packetTimeBase: Rational = new Rational(1, DEFAULT_SAMPLE_RATE);
+  private pendingTimestamp = 0; // Track current chunk timestamp for output
+  private packetTimeBase: Rational = new Rational(1, 1_000_000); // Microsecond timebase
   private outputSampleFormat: AVSampleFormat = AV_SAMPLE_FMT_FLT;
   private filterDescription: string | null = null;
   private outputFormat: AudioSampleFormat = 'f32';
@@ -80,18 +81,19 @@ export class NodeAvAudioDecoder extends EventEmitter implements AudioDecoderBack
 
   startDecoder(config: AudioDecoderBackendConfig): void {
     this.config = { ...config };
-    this.packetTimeBase = new Rational(1, config.sampleRate);
+    // Keep packetTimeBase at microseconds (1/1_000_000) - do NOT change to sampleRate
+    // packet.pts is set in microseconds, so timebase must match for correct timestamp conversion
     this.outputFormat = this.parseOutputFormat(config);
     this.outputSampleFormat = mapSampleFormat(this.outputFormat);
   }
 
-  write(data: Buffer | Uint8Array): boolean {
+  write(data: Buffer | Uint8Array, timestamp?: number): boolean {
     if (!this.config || this.shuttingDown) {
       return false;
     }
 
-    // Pass raw data directly - extradata is set on the decoder context
-    this.queue.push(Buffer.from(data));
+    // Pass raw data with timestamp - extradata is set on the decoder context
+    this.queue.push({ buffer: Buffer.from(data), timestamp: timestamp ?? 0 });
     void this.processQueue();
     return true;
   }
@@ -123,8 +125,9 @@ export class NodeAvAudioDecoder extends EventEmitter implements AudioDecoderBack
 
       try {
         while (this.queue.length > 0) {
-          const data = this.queue.shift()!;
-          await this.decodeBuffer(data);
+          const { buffer, timestamp } = this.queue.shift()!;
+          this.pendingTimestamp = timestamp;
+          await this.decodeBuffer(buffer, timestamp);
         }
       } catch (err) {
         this.emit('error', err instanceof Error ? err : new Error(String(err)));
@@ -177,7 +180,7 @@ export class NodeAvAudioDecoder extends EventEmitter implements AudioDecoderBack
     return config.outputFormat ?? defaultFormat;
   }
 
-  private async decodeBuffer(buffer: Buffer): Promise<void> {
+  private async decodeBuffer(buffer: Buffer, timestamp: number): Promise<void> {
     await this.ensureDecoder();
     if (!this.decoder || !this.stream) {
       throw new Error('Decoder not initialized');
@@ -186,11 +189,12 @@ export class NodeAvAudioDecoder extends EventEmitter implements AudioDecoderBack
     const packet = new Packet();
     packet.alloc();
     packet.streamIndex = this.stream.index;
-    packet.pts = BigInt(this.packetIndex);
-    packet.dts = BigInt(this.packetIndex);
+    // Use actual chunk timestamp (microseconds)
+    packet.pts = BigInt(Math.round(timestamp));
+    packet.dts = BigInt(Math.round(timestamp));
     packet.timeBase = this.packetTimeBase;
     packet.data = buffer;
-    packet.duration = 1n;
+    packet.duration = 1n; // Will be computed from frame output
 
     await this.decoder.decode(packet);
     packet.unref();
@@ -210,12 +214,24 @@ export class NodeAvAudioDecoder extends EventEmitter implements AudioDecoderBack
     while (frame) {
       const nbSamples = frame.nbSamples;
       if (nbSamples > 0) {
+        // Get timestamp from frame PTS (in microseconds, matching our timebase)
+        // If no PTS available, fall back to computing from sample count
+        let timestamp: number;
+        if (frame.pts !== undefined && frame.pts >= 0n) {
+          const tb = frame.timeBase;
+          // Convert from frame timebase to microseconds
+          timestamp = Number((frame.pts * BigInt(tb.num) * 1_000_000n) / BigInt(tb.den));
+        } else {
+          // Fallback: compute from sample position
+          timestamp = (this.frameIndex * 1_000_000) / (this.config?.sampleRate ?? 48000);
+        }
+
         const passthrough = this.canPassThrough(frame);
         if (passthrough) {
           this.emit('frame', {
             nativeFrame: frame,
             numberOfFrames: nbSamples,
-            timestamp: this.frameIndex,
+            timestamp,
           });
           this.frameIndex += nbSamples;
         } else {
@@ -225,7 +241,7 @@ export class NodeAvAudioDecoder extends EventEmitter implements AudioDecoderBack
             this.emit('frame', {
               data: converted,
               numberOfFrames: nbSamples,
-              timestamp: this.frameIndex,
+              timestamp,
             });
             this.frameIndex += nbSamples;
           }

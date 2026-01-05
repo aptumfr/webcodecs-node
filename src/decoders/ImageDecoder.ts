@@ -44,6 +44,8 @@ export class ImageTrack {
   private _frameCount: number;
   private _repetitionCount: number;
   private _selected: boolean;
+  private _trackList: ImageTrackList | null = null;
+  private _index: number = -1;
 
   constructor(options: {
     animated: boolean;
@@ -61,6 +63,33 @@ export class ImageTrack {
   get frameCount(): number { return this._frameCount; }
   get repetitionCount(): number { return this._repetitionCount; }
   get selected(): boolean { return this._selected; }
+
+  /**
+   * Set the selected state of this track.
+   * Setting to true deselects any previously selected track.
+   * Per WebCodecs spec, this allows switching between tracks.
+   */
+  set selected(value: boolean) {
+    if (value === this._selected) return;
+
+    if (value && this._trackList) {
+      // Deselect the currently selected track
+      this._trackList._deselectAll();
+      this._selected = true;
+      this._trackList._updateSelectedIndex(this._index);
+    } else {
+      this._selected = value;
+      if (!value && this._trackList) {
+        this._trackList._updateSelectedIndex(-1);
+      }
+    }
+  }
+
+  /** @internal */
+  _setTrackList(trackList: ImageTrackList, index: number): void {
+    this._trackList = trackList;
+    this._index = index;
+  }
 }
 
 /**
@@ -93,6 +122,7 @@ export class ImageTrackList {
   _addTrack(track: ImageTrack): void {
     const index = this._tracks.length;
     this._tracks.push(track);
+    track._setTrackList(this, index);
     if (track.selected && this._selectedIndex === -1) {
       this._selectedIndex = index;
     }
@@ -101,6 +131,18 @@ export class ImageTrackList {
   /** @internal */
   _markReady(): void {
     this._resolveReady();
+  }
+
+  /** @internal - Deselect all tracks (called when selecting a new track) */
+  _deselectAll(): void {
+    for (const track of this._tracks) {
+      (track as any)._selected = false;
+    }
+  }
+
+  /** @internal - Update the selected index */
+  _updateSelectedIndex(index: number): void {
+    this._selectedIndex = index;
   }
 
   [Symbol.iterator](): Iterator<ImageTrack> {

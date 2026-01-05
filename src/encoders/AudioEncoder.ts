@@ -231,17 +231,18 @@ export class AudioEncoder extends WebCodecsEventTarget {
       const frameForEncode = clone ?? nativeFrame;
       try {
         // Cast to any for node-av Frame type boundary
-        writeSuccess = this._encoder.writeFrame(frameForEncode as any, true);
+        // Pass timestamp explicitly to preserve it through native frame path
+        writeSuccess = this._encoder.writeFrame(frameForEncode as any, true, data.timestamp);
       } catch {
         writeSuccess = false;
       }
       if (!writeSuccess) {
         const pcmData = this._audioDataToPCM(data);
-        writeSuccess = this._encoder.write(pcmData);
+        writeSuccess = this._encoder.write(pcmData, data.timestamp);
       }
     } else {
       const pcmData = this._audioDataToPCM(data);
-      writeSuccess = this._encoder.write(pcmData);
+      writeSuccess = this._encoder.write(pcmData, data.timestamp);
     }
     if (!writeSuccess) {
       this._encodeQueueSize = Math.max(0, this._encodeQueueSize - 1);
@@ -376,10 +377,12 @@ export class AudioEncoder extends WebCodecsEventTarget {
     }
   }
 
-  private _handleEncodedFrame(frame: { data: Buffer; timestamp: number; keyFrame: boolean; description?: Buffer }): void {
+  private _handleEncodedFrame(frame: { data: Buffer; timestamp: number; keyFrame: boolean; description?: Buffer; durationSamples?: number }): void {
     if (!this._config) return;
 
-    const samplesPerFrame = getAudioFrameSize(this._ffmpegCodec) || 1024;
+    // Use actual duration from packet if available, otherwise fall back to fixed lookup
+    // This correctly handles PCM (variable) and Opus (2.5ms-60ms frame durations)
+    const samplesPerFrame = frame.durationSamples ?? getAudioFrameSize(this._ffmpegCodec) ?? 1024;
     // Use timestamp from backend (in samples at encoder rate) converted to microseconds
     // Use _encoderSampleRate (48kHz for Opus) not config.sampleRate
     // Clamp to non-negative (AAC encoder has priming delay causing negative initial timestamps)
