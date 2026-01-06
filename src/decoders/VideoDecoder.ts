@@ -25,71 +25,17 @@ import { getCodecBase, parseCodec } from '../utils/codec-cache.js';
 import { encodingError, wrapAsWebCodecsError } from '../utils/errors.js';
 import { validateVideoDecoderConfig, validateVideoCodec } from '../utils/codec-validation.js';
 
-const SUPPORTED_OUTPUT_FORMATS: VideoPixelFormat[] = [
-  'I420', 'I420A', 'I422', 'I422A', 'I444', 'I444A', 'NV12', 'RGBA', 'RGBX', 'BGRA', 'BGRX',
-  // 10-bit formats
-  'I420P10', 'I420AP10', 'I422P10', 'I422AP10', 'I444P10', 'I444AP10', 'P010',
-  // 12-bit formats
-  'I420P12', 'I420AP12', 'I422P12', 'I422AP12', 'I444P12', 'I444AP12'
-];
+// Import from submodule
+import {
+  SUPPORTED_OUTPUT_FORMATS,
+  DEFAULT_FLUSH_TIMEOUT,
+  DEFAULT_MAX_QUEUE_SIZE,
+} from './video/constants.js';
+import { calculateMaxQueueSize } from './video/queue.js';
+import type { CodecState, VideoDecoderConfig, VideoDecoderInit, VideoDecoderSupport } from './video/types.js';
 
-export type CodecState = 'unconfigured' | 'configured' | 'closed';
-
-export interface VideoDecoderConfig {
-  codec: string;
-  description?: ArrayBuffer | ArrayBufferView;
-  codedWidth?: number;
-  codedHeight?: number;
-  displayAspectWidth?: number;
-  displayAspectHeight?: number;
-  colorSpace?: VideoColorSpaceInit;
-  hardwareAcceleration?: 'no-preference' | 'prefer-hardware' | 'prefer-software';
-  optimizeForLatency?: boolean;
-  outputFormat?: VideoPixelFormat;
-  /** Frame rotation in degrees (0, 90, 180, 270) - applied to decoded frames */
-  rotation?: 0 | 90 | 180 | 270;
-  /** Whether to flip the frame horizontally - applied to decoded frames */
-  flip?: boolean;
-  /**
-   * Maximum number of chunks that can be queued before decode() throws.
-   * If not specified and dimensions are provided, automatically calculated based on resolution:
-   * - 720p and below: 50 frames (~185MB for RGBA)
-   * - 1080p: 30 frames (~250MB for RGBA)
-   * - 4K: 10 frames (~330MB for RGBA)
-   * - 8K: 4 frames (~530MB for RGBA)
-   * If dimensions are not provided, defaults to 100.
-   */
-  maxQueueSize?: number;
-}
-
-export interface VideoDecoderInit {
-  output: (frame: VideoFrame) => void;
-  error: (error: Error) => void;
-}
-
-export interface VideoDecoderSupport {
-  supported: boolean;
-  config: VideoDecoderConfig;
-}
-
-const DEFAULT_FLUSH_TIMEOUT = 30000;
-const DEFAULT_MAX_QUEUE_SIZE = 100; // Fallback if resolution unknown
-
-/**
- * Calculate optimal queue size based on resolution to limit memory usage.
- * Target: ~250-500MB max memory for queued frames (RGBA format).
- */
-function calculateMaxQueueSize(width: number, height: number): number {
-  const pixels = width * height;
-  const rgbaFrameBytes = pixels * 4;
-
-  // Target max memory: ~300MB for queue
-  const targetMemory = 300 * 1024 * 1024;
-  const calculated = Math.floor(targetMemory / rgbaFrameBytes);
-
-  // Clamp between 4 (minimum for smooth operation) and 100 (legacy max)
-  return Math.max(4, Math.min(100, calculated));
-}
+// Re-export types for backward compatibility
+export type { CodecState, VideoDecoderConfig, VideoDecoderInit, VideoDecoderSupport } from './video/types.js';
 
 export class VideoDecoder extends WebCodecsEventTarget {
   private _state: CodecState = 'unconfigured';
