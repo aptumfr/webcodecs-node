@@ -14,8 +14,6 @@ import {
   AV_PIX_FMT_NV12,
   AV_PIX_FMT_RGBA,
   AV_PIX_FMT_YUV420P,
-  AV_PIX_FMT_YUV422P,
-  AV_PIX_FMT_YUV444P,
   AV_PIX_FMT_YUVA420P,
   AV_PIX_FMT_YUV420P10LE,
   AV_PIX_FMT_YUV422P10LE,
@@ -51,86 +49,15 @@ import {
 import { acquireHardwareContext, releaseHardwareContext } from '../utils/hardware-pool.js';
 import { getQualityConfig } from '../config/webcodecs-config.js';
 
+// Import from video-encoder submodule
+import {
+  mapPixelFormat,
+  getSoftwareEncoder,
+  getHardwareMinResolution,
+  buildGpuFilterChain,
+} from './video-encoder/index.js';
+
 const logger = createLogger('NodeAvVideoEncoder');
-
-/**
- * Get human-readable name for AVPixelFormat
- */
-function pixelFormatName(fmt: AVPixelFormat): string {
-  switch (fmt) {
-    case AV_PIX_FMT_YUV420P: return 'yuv420p';
-    case AV_PIX_FMT_YUVA420P: return 'yuva420p';
-    case AV_PIX_FMT_YUV422P: return 'yuv422p';
-    case AV_PIX_FMT_YUV444P: return 'yuv444p';
-    case AV_PIX_FMT_NV12: return 'nv12';
-    case AV_PIX_FMT_RGBA: return 'rgba';
-    case AV_PIX_FMT_BGRA: return 'bgra';
-    case AV_PIX_FMT_YUV420P10LE: return 'yuv420p10le';
-    case AV_PIX_FMT_YUV422P10LE: return 'yuv422p10le';
-    case AV_PIX_FMT_YUV444P10LE: return 'yuv444p10le';
-    case AV_PIX_FMT_P010LE: return 'p010le';
-    default: return 'unknown';
-  }
-}
-
-/**
- * Map WebCodecs pixel format string to AVPixelFormat
- */
-function mapPixelFormat(format: string): AVPixelFormat {
-  const fmt = format.toUpperCase();
-  switch (fmt) {
-    case 'I420':
-    case 'YUV420P':
-      return AV_PIX_FMT_YUV420P;
-    case 'I420A':
-    case 'YUVA420P':
-      return AV_PIX_FMT_YUVA420P;
-    case 'I422':
-    case 'YUV422P':
-      return AV_PIX_FMT_YUV422P;
-    case 'I444':
-    case 'YUV444P':
-      return AV_PIX_FMT_YUV444P;
-    case 'NV12':
-      return AV_PIX_FMT_NV12;
-    case 'BGRA':
-      return AV_PIX_FMT_BGRA;
-    case 'RGBA':
-      return AV_PIX_FMT_RGBA;
-    // 10-bit formats
-    case 'I420P10':
-    case 'YUV420P10LE':
-    case 'YUV420P10':
-      return AV_PIX_FMT_YUV420P10LE;
-    case 'I422P10':
-    case 'YUV422P10LE':
-    case 'YUV422P10':
-      return AV_PIX_FMT_YUV422P10LE;
-    case 'I444P10':
-    case 'YUV444P10LE':
-    case 'YUV444P10':
-      return AV_PIX_FMT_YUV444P10LE;
-    case 'P010':
-    case 'P010LE':
-      return AV_PIX_FMT_P010LE;
-    default:
-      return AV_PIX_FMT_YUV420P;
-  }
-}
-
-/**
- * Get software encoder name for a codec
- */
-function getSoftwareEncoder(codecName: string): string {
-  switch (codecName) {
-    case 'h264': return 'libx264';
-    case 'hevc': return 'libx265';
-    case 'vp8': return 'libvpx';
-    case 'vp9': return 'libvpx-vp9';
-    case 'av1': return 'libsvtav1';
-    default: return codecName;
-  }
-}
 
 /**
  * NodeAV-backed video encoder implementing VideoEncoderBackend interface
@@ -399,7 +326,7 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
       // Try GPU-accelerated filter if hardware context is available
       if (this.hardware) {
         const hwType = this.hardware.deviceTypeName;
-        const gpuFilter = this.buildGpuFilterChain(hwType, targetFormat, inputWidth, inputHeight);
+        const gpuFilter = buildGpuFilterChain(hwType, targetFormat, inputWidth, inputHeight, this.config!.width, this.config!.height);
 
         if (gpuFilter) {
           try {
@@ -421,37 +348,6 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     }
   }
 
-  /**
-   * Build GPU-accelerated filter chain for format conversion and optional rescaling
-   * Returns null if no GPU filter is available for this hardware type
-   */
-  private buildGpuFilterChain(
-    hwType: string,
-    targetFormat: string,
-    inputWidth?: number,
-    inputHeight?: number
-  ): string | null {
-    const outputWidth = this.config!.width;
-    const outputHeight = this.config!.height;
-    const needsScale = inputWidth !== undefined && inputHeight !== undefined &&
-      (inputWidth !== outputWidth || inputHeight !== outputHeight);
-    const scaleParams = needsScale ? `w=${outputWidth}:h=${outputHeight}:` : '';
-
-    // GPU filter chains: upload to GPU → scale on GPU (if needed) → convert format → keep on GPU for encoder
-    switch (hwType) {
-      case 'vaapi':
-        return `format=nv12,hwupload,scale_vaapi=${scaleParams}format=${targetFormat}`;
-      case 'cuda':
-        return `format=nv12,hwupload_cuda,scale_cuda=${scaleParams}format=${targetFormat}`;
-      case 'qsv':
-        return `format=nv12,hwupload=extra_hw_frames=64,scale_qsv=${scaleParams}format=${targetFormat}`;
-      case 'videotoolbox':
-        return `format=nv12,hwupload,scale_vt=${scaleParams}format=${targetFormat}`;
-      default:
-        return null;
-    }
-  }
-
   private async selectEncoderCodec(codecName: string): Promise<{ encoderCodec: any; isHardware: boolean }> {
     const hwPref = this.config?.hardwareAcceleration;
     const width = this.config?.width ?? 0;
@@ -463,7 +359,7 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     if (bestEncoder.isHardware && bestEncoder.hwaccel) {
       // Check if resolution meets hardware encoder minimum requirements
       // VAAPI/QSV have known minimum constraints that vary by codec
-      const minSize = this.getHardwareMinResolution(bestEncoder.hwaccel, codecName);
+      const minSize = getHardwareMinResolution(bestEncoder.hwaccel, codecName);
       if (width < minSize.width || height < minSize.height) {
         logger.info(`Resolution ${width}x${height} below hardware minimum ${minSize.width}x${minSize.height}, using software encoder`);
       } else {
@@ -489,30 +385,6 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     const softwareCodec = getSoftwareEncoder(codecName);
     logger.info(`Using software encoder: ${softwareCodec}`);
     return { encoderCodec: softwareCodec as FFEncoderCodec, isHardware: false };
-  }
-
-  /**
-   * Get minimum resolution requirements for hardware encoders
-   * These are known constraints from hardware encoder specifications
-   */
-  private getHardwareMinResolution(hwaccel: string, codec: string): { width: number; height: number } {
-    // VAAPI constraints (Intel/AMD)
-    if (hwaccel === 'vaapi') {
-      if (codec === 'h264') return { width: 128, height: 128 };
-      if (codec === 'hevc' || codec === 'h265') return { width: 130, height: 128 };
-      if (codec === 'vp8' || codec === 'vp9') return { width: 128, height: 128 };
-      if (codec === 'av1') return { width: 128, height: 128 };
-    }
-    // QSV constraints (Intel)
-    if (hwaccel === 'qsv') {
-      return { width: 128, height: 128 };
-    }
-    // NVENC typically supports smaller sizes
-    if (hwaccel === 'nvenc') {
-      return { width: 32, height: 32 };
-    }
-    // Default: no minimum constraint
-    return { width: 1, height: 1 };
   }
 
   private buildEncoderOptions(codecName: string, framerate: number, gopSize: number): Record<string, any> {

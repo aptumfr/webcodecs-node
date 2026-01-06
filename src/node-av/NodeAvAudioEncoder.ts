@@ -17,11 +17,6 @@ import {
   AV_SAMPLE_FMT_U8,
   AV_SAMPLE_FMT_S32,
   AV_PKT_FLAG_KEY,
-  AV_CHANNEL_ORDER_NATIVE,
-  AV_CH_LAYOUT_MONO,
-  AV_CH_LAYOUT_STEREO,
-  AV_CH_LAYOUT_5POINT1,
-  AV_CH_LAYOUT_7POINT1,
   type AVSampleFormat,
   type FFEncoderCodec,
 } from 'node-av/constants';
@@ -33,10 +28,20 @@ import type {
 } from '../backends/types.js';
 import { createLogger } from '../utils/logger.js';
 
-const logger = createLogger('NodeAvAudioEncoder');
+// Import from audio-encoder submodule
+import {
+  OPUS_SAMPLE_RATE,
+  getEncoderName,
+  getEncoderCodec,
+  getChannelLayout,
+  convertToPlanar,
+  convertToS16Interleaved,
+  convertToS32Interleaved,
+  convertToS16Planar,
+  convertToU8Interleaved,
+} from './audio-encoder/index.js';
 
-/** Default sample rate for Opus codec */
-const OPUS_SAMPLE_RATE = 48000;
+const logger = createLogger('NodeAvAudioEncoder');
 
 /**
  * NodeAV-backed audio encoder implementing AudioEncoderBackend interface
@@ -68,7 +73,7 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
   startEncoder(config: AudioEncoderBackendConfig): void {
     this.config = { ...config };
 
-    const codecName = this.getEncoderName(config.codec);
+    const codecName = getEncoderName(config.codec);
     const isOpus = codecName === 'libopus';
 
     // Store sample rates
@@ -87,22 +92,6 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
 
     // Input is always float32 interleaved from AudioData conversion
     this.sampleFormat = AV_SAMPLE_FMT_FLT;
-  }
-
-  private getEncoderName(codec: string): string {
-    const codecLower = codec.toLowerCase();
-    if (codecLower.startsWith('mp4a') || codecLower === 'aac') {
-      return 'aac';
-    } else if (codecLower === 'opus') {
-      return 'libopus';
-    } else if (codecLower === 'vorbis') {
-      return 'libvorbis';
-    } else if (codecLower === 'flac') {
-      return 'flac';
-    } else if (codecLower === 'mp3') {
-      return 'libmp3lame';
-    }
-    return 'aac';
   }
 
   write(data: Buffer | Uint8Array, timestamp?: number): boolean {
@@ -201,7 +190,7 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       return;
     }
 
-    const encoderCodec = this.getEncoderCodec(this.config.codec);
+    const encoderCodec = getEncoderCodec(this.config.codec);
     const options = this.buildEncoderOptions();
 
     // Store the encoder's required sample format
@@ -312,40 +301,6 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
     }
   }
 
-  private getEncoderCodec(codec: string): string {
-    const codecBase = codec.split('.')[0].toLowerCase();
-
-    switch (codecBase) {
-      case 'opus':
-        return 'libopus';
-      case 'mp3':
-        return 'libmp3lame';
-      case 'flac':
-        return 'flac';
-      case 'mp4a':
-      case 'aac':
-        return 'aac';
-      case 'vorbis':
-        return 'libvorbis';
-      case 'pcm-s16':
-        return 'pcm_s16le';
-      case 'pcm-s24':
-        return 'pcm_s24le';
-      case 'pcm-s32':
-        return 'pcm_s32le';
-      case 'pcm-u8':
-        return 'pcm_u8';
-      case 'ulaw':
-        return 'pcm_mulaw';
-      case 'alaw':
-        return 'pcm_alaw';
-      case 'pcm-f32':
-        return 'pcm_f32le';
-      default:
-        return 'aac';
-    }
-  }
-
   private buildEncoderOptions() {
     if (!this.config) {
       throw new Error('Config not set');
@@ -443,29 +398,12 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
     return {
       type: 'audio' as const,
       sampleRate: isOpus ? OPUS_SAMPLE_RATE : this.config.sampleRate,
-      channelLayout: this.getChannelLayout(this.config.numberOfChannels),
+      channelLayout: getChannelLayout(this.config.numberOfChannels),
       sampleFormat,
       timeBase: this.timeBase,
       bitrate: this.config.bitrate,
       options,
     };
-  }
-
-  private getChannelLayout(numChannels: number): { nbChannels: number; order: number; mask: bigint } {
-    // Standard channel layouts as ChannelLayout objects
-    // Order 1 = AV_CHANNEL_ORDER_NATIVE (required for FFmpeg)
-    switch (numChannels) {
-      case 1:
-        return { nbChannels: 1, order: AV_CHANNEL_ORDER_NATIVE, mask: AV_CH_LAYOUT_MONO };
-      case 2:
-        return { nbChannels: 2, order: AV_CHANNEL_ORDER_NATIVE, mask: AV_CH_LAYOUT_STEREO };
-      case 6:
-        return { nbChannels: 6, order: AV_CHANNEL_ORDER_NATIVE, mask: AV_CH_LAYOUT_5POINT1 };
-      case 8:
-        return { nbChannels: 8, order: AV_CHANNEL_ORDER_NATIVE, mask: AV_CH_LAYOUT_7POINT1 };
-      default:
-        return { nbChannels: numChannels, order: AV_CHANNEL_ORDER_NATIVE, mask: BigInt((1 << numChannels) - 1) };
-    }
   }
 
   private async encodeBuffer(buffer: Buffer, timestamp?: number): Promise<void> {
@@ -496,29 +434,29 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       frameFormat = AV_SAMPLE_FMT_FLT;
     } else if (this.encoderSampleFormat === AV_SAMPLE_FMT_S16) {
       // Encoder needs interleaved s16 - convert from f32 interleaved to s16 interleaved
-      audioData = Buffer.from(this.convertToS16Interleaved(buffer, samplesPerChannel, this.config.numberOfChannels));
+      audioData = Buffer.from(convertToS16Interleaved(buffer, samplesPerChannel, this.config.numberOfChannels));
       frameFormat = AV_SAMPLE_FMT_S16;
     } else if (this.encoderSampleFormat === AV_SAMPLE_FMT_S16P) {
       // Encoder needs planar s16 - convert from f32 interleaved to s16 planar
-      audioData = Buffer.from(this.convertToS16Planar(buffer, samplesPerChannel, this.config.numberOfChannels));
+      audioData = Buffer.from(convertToS16Planar(buffer, samplesPerChannel, this.config.numberOfChannels));
       frameFormat = AV_SAMPLE_FMT_S16P;
     } else if (this.encoderSampleFormat === AV_SAMPLE_FMT_S32) {
       // Encoder needs interleaved s32 - convert from f32 interleaved to s32 interleaved
-      audioData = Buffer.from(this.convertToS32Interleaved(buffer, samplesPerChannel, this.config.numberOfChannels));
+      audioData = Buffer.from(convertToS32Interleaved(buffer, samplesPerChannel, this.config.numberOfChannels));
       frameFormat = AV_SAMPLE_FMT_S32;
     } else if (this.encoderSampleFormat === AV_SAMPLE_FMT_U8) {
-      audioData = Buffer.from(this.convertToU8Interleaved(buffer, samplesPerChannel, this.config.numberOfChannels));
+      audioData = Buffer.from(convertToU8Interleaved(buffer, samplesPerChannel, this.config.numberOfChannels));
       frameFormat = AV_SAMPLE_FMT_U8;
     } else {
       // Default: encoder needs planar float - convert from f32 interleaved to f32 planar
-      audioData = Buffer.from(this.convertToPlanar(buffer, samplesPerChannel, this.config.numberOfChannels));
+      audioData = Buffer.from(convertToPlanar(buffer, samplesPerChannel, this.config.numberOfChannels));
       frameFormat = AV_SAMPLE_FMT_FLTP;
     }
 
     // Create input frame at INPUT sample rate
     const inputFrame = Frame.fromAudioBuffer(audioData, {
       sampleRate: this.inputSampleRate,
-      channelLayout: this.getChannelLayout(this.config.numberOfChannels),
+      channelLayout: getChannelLayout(this.config.numberOfChannels),
       format: frameFormat,
       nbSamples: samplesPerChannel,
       timeBase: new Rational(1, this.inputSampleRate),
@@ -568,92 +506,6 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
     this.extractCodecDescription();
 
     await this.drainPackets();
-  }
-
-  private convertToPlanar(data: Buffer, samplesPerChannel: number, numChannels: number): Uint8Array {
-    const bytesPerSample = 4; // f32
-    const planeSize = samplesPerChannel * bytesPerSample;
-    const result = new Uint8Array(planeSize * numChannels);
-
-    const input = new Float32Array(data.buffer, data.byteOffset, data.byteLength / 4);
-    const output = new Float32Array(result.buffer);
-
-    for (let s = 0; s < samplesPerChannel; s++) {
-      for (let ch = 0; ch < numChannels; ch++) {
-        const srcIdx = s * numChannels + ch;
-        const dstIdx = ch * samplesPerChannel + s;
-        output[dstIdx] = input[srcIdx];
-      }
-    }
-
-    return result;
-  }
-
-  private convertToS16Interleaved(data: Buffer, samplesPerChannel: number, numChannels: number): Uint8Array {
-    const totalSamples = samplesPerChannel * numChannels;
-    const result = new Uint8Array(totalSamples * 2); // 2 bytes per s16 sample
-
-    const input = new Float32Array(data.buffer, data.byteOffset, data.byteLength / 4);
-    const output = new Int16Array(result.buffer);
-
-    for (let i = 0; i < totalSamples; i++) {
-      // Convert f32 [-1.0, 1.0] to s16 [-32768, 32767]
-      const clamped = Math.max(-1.0, Math.min(1.0, input[i]));
-      output[i] = Math.round(clamped * 32767);
-    }
-
-    return result;
-  }
-
-  private convertToS32Interleaved(data: Buffer, samplesPerChannel: number, numChannels: number): Uint8Array {
-    const totalSamples = samplesPerChannel * numChannels;
-    const result = new Uint8Array(totalSamples * 4); // 4 bytes per s32 sample
-
-    const input = new Float32Array(data.buffer, data.byteOffset, data.byteLength / 4);
-    const output = new Int32Array(result.buffer);
-
-    for (let i = 0; i < totalSamples; i++) {
-      const clamped = Math.max(-1.0, Math.min(1.0, input[i]));
-      output[i] = Math.round(clamped * 2147483647);
-    }
-
-    return result;
-  }
-
-  private convertToS16Planar(data: Buffer, samplesPerChannel: number, numChannels: number): Uint8Array {
-    const bytesPerSample = 2; // s16
-    const planeSize = samplesPerChannel * bytesPerSample;
-    const result = new Uint8Array(planeSize * numChannels);
-
-    const input = new Float32Array(data.buffer, data.byteOffset, data.byteLength / 4);
-    const output = new Int16Array(result.buffer);
-
-    for (let s = 0; s < samplesPerChannel; s++) {
-      for (let ch = 0; ch < numChannels; ch++) {
-        const srcIdx = s * numChannels + ch;
-        const dstIdx = ch * samplesPerChannel + s;
-        // Convert f32 [-1.0, 1.0] to s16 [-32768, 32767]
-        const clamped = Math.max(-1.0, Math.min(1.0, input[srcIdx]));
-        output[dstIdx] = Math.round(clamped * 32767);
-      }
-    }
-
-    return result;
-  }
-
-  private convertToU8Interleaved(data: Buffer, samplesPerChannel: number, numChannels: number): Uint8Array {
-    const totalSamples = samplesPerChannel * numChannels;
-    const result = new Uint8Array(totalSamples);
-
-    const input = new Float32Array(data.buffer, data.byteOffset, data.byteLength / 4);
-
-    for (let i = 0; i < totalSamples; i++) {
-      const clamped = Math.max(-1.0, Math.min(1.0, input[i]));
-      const u8 = Math.round((clamped + 1) * 127.5); // map [-1,1] to [0,255]
-      result[i] = u8;
-    }
-
-    return result;
   }
 
   private async finish(): Promise<void> {
