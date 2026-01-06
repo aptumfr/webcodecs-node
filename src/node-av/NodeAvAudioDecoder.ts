@@ -13,31 +13,7 @@ import {
   AVMEDIA_TYPE_AUDIO,
   AV_SAMPLE_FMT_FLT,
   AV_SAMPLE_FMT_FLTP,
-  AV_SAMPLE_FMT_S16,
-  AV_SAMPLE_FMT_S16P,
-  AV_SAMPLE_FMT_S32,
-  AV_SAMPLE_FMT_S32P,
-  AV_SAMPLE_FMT_U8,
-  AV_SAMPLE_FMT_U8P,
-  AV_CODEC_ID_AAC,
-  AV_CODEC_ID_OPUS,
-  AV_CODEC_ID_MP3,
-  AV_CODEC_ID_FLAC,
-  AV_CODEC_ID_VORBIS,
-  AV_CODEC_ID_PCM_S16LE,
-  AV_CODEC_ID_PCM_S24LE,
-  AV_CODEC_ID_PCM_S32LE,
-  AV_CODEC_ID_PCM_F32LE,
-  AV_CODEC_ID_PCM_U8,
-  AV_CODEC_ID_PCM_MULAW,
-  AV_CODEC_ID_PCM_ALAW,
-  AV_CHANNEL_ORDER_NATIVE,
-  AV_CH_LAYOUT_MONO,
-  AV_CH_LAYOUT_STEREO,
-  AV_CH_LAYOUT_5POINT1,
-  AV_CH_LAYOUT_7POINT1,
   type AVSampleFormat,
-  type AVCodecID,
 } from 'node-av/constants';
 
 import type {
@@ -48,11 +24,14 @@ import type {
 import type { AudioSampleFormat } from '../types/audio.js';
 import { createLogger } from '../utils/logger.js';
 import { toUint8Array } from '../utils/buffer.js';
+import {
+  mapCodecId,
+  mapSampleFormat,
+  sampleFormatToFFmpegName,
+  getChannelLayout,
+} from './audio-decoder/index.js';
 
 const logger = createLogger('NodeAvAudioDecoder');
-
-/** Default sample rate for audio decoding */
-const DEFAULT_SAMPLE_RATE = 48000;
 
 /**
  * NodeAV-backed audio decoder implementing AudioDecoderBackend interface
@@ -159,7 +138,7 @@ export class NodeAvAudioDecoder extends EventEmitter implements AudioDecoderBack
     params.codecType = AVMEDIA_TYPE_AUDIO;
     params.codecId = codecId;
     params.sampleRate = this.config.sampleRate;
-    params.channelLayout = this.getChannelLayout(this.config.numberOfChannels) as any;
+    params.channelLayout = getChannelLayout(this.config.numberOfChannels) as any;
     (params as any).channels = this.config.numberOfChannels;
 
     // Set extradata if we have description (e.g., AudioSpecificConfig for AAC)
@@ -323,23 +302,6 @@ export class NodeAvAudioDecoder extends EventEmitter implements AudioDecoderBack
     return output;
   }
 
-  private getChannelLayout(numChannels: number): { nbChannels: number; order: number; mask: bigint } {
-    // Standard channel layouts as ChannelLayout objects
-    // Order 1 = AV_CHANNEL_ORDER_NATIVE (required for FFmpeg)
-    switch (numChannels) {
-      case 1:
-        return { nbChannels: 1, order: AV_CHANNEL_ORDER_NATIVE, mask: AV_CH_LAYOUT_MONO };
-      case 2:
-        return { nbChannels: 2, order: AV_CHANNEL_ORDER_NATIVE, mask: AV_CH_LAYOUT_STEREO };
-      case 6:
-        return { nbChannels: 6, order: AV_CHANNEL_ORDER_NATIVE, mask: AV_CH_LAYOUT_5POINT1 };
-      case 8:
-        return { nbChannels: 8, order: AV_CHANNEL_ORDER_NATIVE, mask: AV_CH_LAYOUT_7POINT1 };
-      default:
-        return { nbChannels: numChannels, order: AV_CHANNEL_ORDER_NATIVE, mask: BigInt((1 << numChannels) - 1) };
-    }
-  }
-
   private async finish(): Promise<void> {
     await this.processQueue();
     if (this.processingPromise) {
@@ -367,83 +329,5 @@ export class NodeAvAudioDecoder extends EventEmitter implements AudioDecoderBack
     this.formatContext = null;
     this.stream = null;
     this.queue = [];
-  }
-}
-
-function mapCodecId(codec: string): AVCodecID | null {
-  const codecBase = codec.split('.')[0].toLowerCase();
-  switch (codecBase) {
-    case 'mp4a':
-    case 'aac':
-      return AV_CODEC_ID_AAC;
-    case 'opus':
-      return AV_CODEC_ID_OPUS;
-    case 'mp3':
-      return AV_CODEC_ID_MP3;
-    case 'flac':
-      return AV_CODEC_ID_FLAC;
-    case 'vorbis':
-      return AV_CODEC_ID_VORBIS;
-    case 'pcm-s16':
-      return AV_CODEC_ID_PCM_S16LE;
-    case 'pcm-s24':
-      return AV_CODEC_ID_PCM_S24LE;
-    case 'pcm-s32':
-      return AV_CODEC_ID_PCM_S32LE;
-    case 'pcm-f32':
-      return AV_CODEC_ID_PCM_F32LE;
-    case 'pcm-u8':
-      return AV_CODEC_ID_PCM_U8;
-    case 'ulaw':
-      return AV_CODEC_ID_PCM_MULAW;
-    case 'alaw':
-      return AV_CODEC_ID_PCM_ALAW;
-    default:
-      return null;
-  }
-}
-
-function mapSampleFormat(format: AudioSampleFormat): AVSampleFormat {
-  switch (format) {
-    case 'u8':
-      return AV_SAMPLE_FMT_U8;
-    case 'u8-planar':
-      return AV_SAMPLE_FMT_U8P;
-    case 's16':
-      return AV_SAMPLE_FMT_S16;
-    case 's16-planar':
-      return AV_SAMPLE_FMT_S16P;
-    case 's32':
-      return AV_SAMPLE_FMT_S32;
-    case 's32-planar':
-      return AV_SAMPLE_FMT_S32P;
-    case 'f32':
-      return AV_SAMPLE_FMT_FLT;
-    case 'f32-planar':
-      return AV_SAMPLE_FMT_FLTP;
-    default:
-      return AV_SAMPLE_FMT_FLT;
-  }
-}
-
-function sampleFormatToFFmpegName(fmt: AVSampleFormat): string {
-  switch (fmt) {
-    case AV_SAMPLE_FMT_U8:
-      return 'u8';
-    case AV_SAMPLE_FMT_U8P:
-      return 'u8p';
-    case AV_SAMPLE_FMT_S16:
-      return 's16';
-    case AV_SAMPLE_FMT_S16P:
-      return 's16p';
-    case AV_SAMPLE_FMT_S32:
-      return 's32';
-    case AV_SAMPLE_FMT_S32P:
-      return 's32p';
-    case AV_SAMPLE_FMT_FLTP:
-      return 'fltp';
-    case AV_SAMPLE_FMT_FLT:
-    default:
-      return 'flt';
   }
 }

@@ -8,64 +8,12 @@
 import { FilterAPI, HardwareContext } from 'node-av/api';
 
 import { createLogger } from '../utils/logger.js';
+import { type HardwareType, HARDWARE_CAPABILITIES } from './hardware-pipeline/index.js';
+
+// Re-export types from submodule
+export type { HardwareType, HardwareFormatCapabilities } from './hardware-pipeline/index.js';
 
 const logger = createLogger('HardwarePipeline');
-
-export type HardwareType = 'cuda' | 'vaapi' | 'qsv' | 'videotoolbox' | 'drm' | 'v4l2m2m' | 'software';
-
-/**
- * Hardware capabilities for format conversion
- */
-interface HardwareFormatCapabilities {
-  // Scale filter name for this hardware (e.g., 'scale_cuda', 'scale_vaapi')
-  scaleFilter: string;
-  // Formats that can be produced directly on GPU before download
-  gpuOutputFormats: string[];
-  // Whether this hardware supports direct RGBA/BGRA output
-  supportsRgbOutput: boolean;
-}
-
-/**
- * Known capabilities for each hardware type
- * These are the theoretical capabilities - actual support depends on driver version
- */
-const HARDWARE_CAPABILITIES: Record<HardwareType, HardwareFormatCapabilities> = {
-  cuda: {
-    scaleFilter: 'scale_cuda',
-    gpuOutputFormats: ['nv12', 'yuv420p', 'p010le', 'yuv444p', 'bgra', 'rgba'],
-    supportsRgbOutput: true,
-  },
-  vaapi: {
-    scaleFilter: 'scale_vaapi',
-    gpuOutputFormats: ['nv12', 'p010'],
-    supportsRgbOutput: false,
-  },
-  qsv: {
-    scaleFilter: 'vpp_qsv',  // vpp_qsv is more capable than scale_qsv
-    gpuOutputFormats: ['nv12', 'p010', 'bgra'],  // bgra on some drivers
-    supportsRgbOutput: false,  // Conservative - driver dependent
-  },
-  videotoolbox: {
-    scaleFilter: 'scale_vt',
-    gpuOutputFormats: ['nv12', 'p010', 'bgra'],
-    supportsRgbOutput: true,
-  },
-  drm: {
-    scaleFilter: '',  // No GPU scale filter for DRM
-    gpuOutputFormats: ['nv12'],
-    supportsRgbOutput: false,
-  },
-  v4l2m2m: {
-    scaleFilter: '',  // No GPU scale filter for V4L2
-    gpuOutputFormats: ['nv12', 'yuv420p'],
-    supportsRgbOutput: false,
-  },
-  software: {
-    scaleFilter: '',
-    gpuOutputFormats: [],
-    supportsRgbOutput: false,
-  },
-};
 
 /**
  * Cache for probed filter chains
