@@ -12,25 +12,7 @@ import { FormatContext, Packet, Stream, Rational } from 'node-av/lib';
 import {
   AVMEDIA_TYPE_VIDEO,
   AV_PKT_FLAG_KEY,
-  AV_CODEC_ID_H264,
-  AV_CODEC_ID_HEVC,
-  AV_CODEC_ID_VP8,
-  AV_CODEC_ID_VP9,
-  AV_CODEC_ID_AV1,
-  AV_PIX_FMT_BGRA,
-  AV_PIX_FMT_BGR0,
-  AV_PIX_FMT_NV12,
-  AV_PIX_FMT_RGBA,
-  AV_PIX_FMT_RGB0,
   AV_PIX_FMT_YUV420P,
-  AV_PIX_FMT_YUV422P,
-  AV_PIX_FMT_YUV444P,
-  AV_PIX_FMT_YUVA420P,
-  AV_PIX_FMT_YUV420P10LE,
-  AV_PIX_FMT_YUV422P10LE,
-  AV_PIX_FMT_YUV444P10LE,
-  AV_PIX_FMT_P010LE,
-  type AVCodecID,
   type AVPixelFormat,
 } from 'node-av/constants';
 
@@ -46,19 +28,15 @@ import { parseCodecString } from '../hardware/index.js';
 import { createLogger } from '../utils/logger.js';
 import { selectBestFilterChain, getNextFilterChain, describePipeline } from './HardwarePipeline.js';
 import { acquireHardwareContext, releaseHardwareContext } from '../utils/hardware-pool.js';
+import {
+  MAX_FILTER_CHAIN_ATTEMPTS,
+  SKIP_HARDWARE_CODECS,
+  mapCodecId,
+  mapPixelFormat,
+  pixelFormatToFFmpegName,
+} from './video-decoder/index.js';
 
 const logger = createLogger('NodeAvVideoDecoder');
-
-/** Maximum filter chain fallback attempts */
-const MAX_FILTER_CHAIN_ATTEMPTS = 10;
-
-/**
- * Codecs to skip for hardware decoding.
- * Empty by default - hardware decoding is attempted for all codecs when requested.
- * Can be populated if specific codecs are known to fail on certain hardware.
- * Previously VP9/AV1 were skipped, but modern VAAPI/QSV support these well.
- */
-const SKIP_HARDWARE_CODECS: string[] = [];
 
 /**
  * NodeAV-backed video decoder implementing VideoDecoderBackend interface
@@ -395,102 +373,5 @@ export class NodeAvVideoDecoder extends EventEmitter implements VideoDecoderBack
     this.stream = null;
     this.queue = [];
     this.pendingTimestamps = [];
-  }
-}
-
-function mapCodecId(codec: string): AVCodecID | null {
-  switch (codec.toLowerCase()) {
-    case 'h264':
-      return AV_CODEC_ID_H264;
-    case 'hevc':
-    case 'h265':
-      return AV_CODEC_ID_HEVC;
-    case 'vp8':
-      return AV_CODEC_ID_VP8;
-    case 'vp9':
-      return AV_CODEC_ID_VP9;
-    case 'av1':
-      return AV_CODEC_ID_AV1;
-    default:
-      return null;
-  }
-}
-
-function mapPixelFormat(format: string): AVPixelFormat {
-  const fmt = format.toUpperCase();
-  switch (fmt) {
-    case 'I420':
-    case 'YUV420P':
-      return AV_PIX_FMT_YUV420P;
-    case 'I420A':
-    case 'YUVA420P':
-      return AV_PIX_FMT_YUVA420P;
-    case 'I422':
-    case 'YUV422P':
-      return AV_PIX_FMT_YUV422P;
-    case 'I444':
-    case 'YUV444P':
-      return AV_PIX_FMT_YUV444P;
-    case 'NV12':
-      return AV_PIX_FMT_NV12;
-    case 'BGRA':
-      return AV_PIX_FMT_BGRA;
-    case 'BGRX':
-      return AV_PIX_FMT_BGR0;
-    case 'RGBA':
-      return AV_PIX_FMT_RGBA;
-    case 'RGBX':
-      return AV_PIX_FMT_RGB0;
-    // 10-bit formats
-    case 'I420P10':
-    case 'YUV420P10LE':
-    case 'YUV420P10':
-      return AV_PIX_FMT_YUV420P10LE;
-    case 'I422P10':
-    case 'YUV422P10LE':
-    case 'YUV422P10':
-      return AV_PIX_FMT_YUV422P10LE;
-    case 'I444P10':
-    case 'YUV444P10LE':
-    case 'YUV444P10':
-      return AV_PIX_FMT_YUV444P10LE;
-    case 'P010':
-    case 'P010LE':
-      return AV_PIX_FMT_P010LE;
-    default:
-      return AV_PIX_FMT_YUV420P;
-  }
-}
-
-function pixelFormatToFFmpegName(fmt: AVPixelFormat): string {
-  switch (fmt) {
-    case AV_PIX_FMT_BGRA:
-      return 'bgra';
-    case AV_PIX_FMT_BGR0:
-      return 'bgr0';
-    case AV_PIX_FMT_RGBA:
-      return 'rgba';
-    case AV_PIX_FMT_RGB0:
-      return 'rgb0';
-    case AV_PIX_FMT_NV12:
-      return 'nv12';
-    case AV_PIX_FMT_YUV422P:
-      return 'yuv422p';
-    case AV_PIX_FMT_YUV444P:
-      return 'yuv444p';
-    case AV_PIX_FMT_YUVA420P:
-      return 'yuva420p';
-    // 10-bit formats
-    case AV_PIX_FMT_YUV420P10LE:
-      return 'yuv420p10le';
-    case AV_PIX_FMT_YUV422P10LE:
-      return 'yuv422p10le';
-    case AV_PIX_FMT_YUV444P10LE:
-      return 'yuv444p10le';
-    case AV_PIX_FMT_P010LE:
-      return 'p010le';
-    case AV_PIX_FMT_YUV420P:
-    default:
-      return 'yuv420p';
   }
 }

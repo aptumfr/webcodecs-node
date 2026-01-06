@@ -11,61 +11,23 @@
 
 import { Decoder, Demuxer, FilterAPI } from 'node-av/api';
 import { FormatContext, Packet, Stream, Rational } from 'node-av/lib';
-import {
-  AVMEDIA_TYPE_VIDEO,
-  AV_CODEC_ID_PNG,
-  AV_CODEC_ID_MJPEG,
-  AV_CODEC_ID_WEBP,
-  AV_CODEC_ID_GIF,
-  AV_CODEC_ID_BMP,
-  AV_CODEC_ID_TIFF,
-  AV_CODEC_ID_AV1,
-  type AVCodecID,
-  type AVPixelFormat,
-} from 'node-av/constants';
+import { AVMEDIA_TYPE_VIDEO, type AVCodecID } from 'node-av/constants';
 
-import type { VideoColorSpaceInit } from '../formats/index.js';
 import type { VideoPixelFormat } from '../core/VideoFrame.js';
 import { extractColorSpaceFromFrame } from '../formats/color-space.js';
-import { ffmpegToPixelFormat, pixelFormatToFFmpeg } from '../codec-utils/formats.js';
+import { pixelFormatToFFmpeg } from '../codec-utils/formats.js';
+import {
+  type DecodedImageFrame,
+  type ImageDecoderConfig,
+  MIME_TO_CODEC_ID,
+  DEMUXER_FORMATS,
+  DEFAULT_FRAME_DURATION,
+  probeImageDimensions,
+} from './image-decoder/index.js';
 
-export interface DecodedImageFrame {
-  data: Uint8Array;
-  width: number;
-  height: number;
-  timestamp: number;
-  duration: number;
-  complete: boolean;
-  colorSpace?: VideoColorSpaceInit;
-  format: VideoPixelFormat;
-}
-
-export interface ImageDecoderConfig {
-  mimeType: string;
-  data: Uint8Array;
-  desiredWidth?: number;
-  desiredHeight?: number;
-  colorSpace?: VideoColorSpaceInit;
-  /** Preferred output pixel format. If not specified, defaults to RGBA. */
-  preferredFormat?: VideoPixelFormat;
-}
-
-// MIME type to AVCodecID mapping
-const MIME_TO_CODEC_ID: Record<string, AVCodecID> = {
-  'image/png': AV_CODEC_ID_PNG,
-  'image/apng': AV_CODEC_ID_PNG,
-  'image/jpeg': AV_CODEC_ID_MJPEG,
-  'image/jpg': AV_CODEC_ID_MJPEG,
-  'image/webp': AV_CODEC_ID_WEBP,
-  'image/gif': AV_CODEC_ID_GIF,
-  'image/bmp': AV_CODEC_ID_BMP,
-  'image/tiff': AV_CODEC_ID_TIFF,
-  'image/avif': AV_CODEC_ID_AV1,
-};
-
-// Formats that require Demuxer for proper decoding (container formats)
-// Note: WebP is excluded because FFmpeg's webp demuxer doesn't support ANIM/ANMF
-const DEMUXER_FORMATS = ['image/gif', 'image/apng', 'image/avif'];
+// Re-export types and utilities from submodule
+export type { DecodedImageFrame, ImageDecoderConfig };
+export { probeImageDimensions };
 
 /**
  * Decode images using node-av native bindings
@@ -82,7 +44,6 @@ export class NodeAvImageDecoder {
 
   // Use a dummy time_base for still images (required by node-av)
   private static readonly DUMMY_TIME_BASE = new Rational(1, 25);
-  private static readonly DEFAULT_FRAME_DURATION = 100000; // 100ms in microseconds
 
   constructor(config: ImageDecoderConfig) {
     this.config = config;
@@ -170,7 +131,7 @@ export class NodeAvImageDecoder {
         const timestampUs = Math.round((pts * timeBaseNum / timeBaseDen) * 1_000_000);
         const durationUs = duration > 0
           ? Math.round((duration * timeBaseNum / timeBaseDen) * 1_000_000)
-          : NodeAvImageDecoder.DEFAULT_FRAME_DURATION;
+          : DEFAULT_FRAME_DURATION;
 
         // Decode packet
         await this.decoder.decode(packet);
@@ -203,7 +164,7 @@ export class NodeAvImageDecoder {
         const converted = await this.convertFrameWithTiming(
           frame,
           lastTimestamp,
-          NodeAvImageDecoder.DEFAULT_FRAME_DURATION
+          DEFAULT_FRAME_DURATION
         );
         frame.unref();
 
@@ -497,64 +458,5 @@ export class NodeAvImageDecoder {
    */
   static isAnimatedTypeSupported(mimeType: string): boolean {
     return DEMUXER_FORMATS.includes(mimeType.toLowerCase());
-  }
-}
-
-/**
- * Probe image dimensions using node-av
- * Returns { width, height } or { width: 0, height: 0 } if probing fails
- */
-export async function probeImageDimensions(
-  data: Uint8Array,
-  mimeType: string
-): Promise<{ width: number; height: number }> {
-  const codecId = MIME_TO_CODEC_ID[mimeType.toLowerCase()];
-  if (!codecId) {
-    return { width: 0, height: 0 };
-  }
-
-  let formatContext: FormatContext | null = null;
-  let stream: Stream | null = null;
-  let decoder: Decoder | null = null;
-
-  try {
-    formatContext = new FormatContext();
-    formatContext.allocContext();
-    stream = formatContext.newStream();
-    stream.timeBase = new Rational(1, 25);
-
-    const params = stream.codecpar;
-    params.codecType = AVMEDIA_TYPE_VIDEO;
-    params.codecId = codecId;
-    params.width = 0;
-    params.height = 0;
-
-    decoder = await Decoder.create(stream, { exitOnError: false });
-
-    const packet = new Packet();
-    packet.alloc();
-    packet.streamIndex = stream.index;
-    packet.pts = 0n;
-    packet.dts = 0n;
-    packet.timeBase = new Rational(1, 25);
-    packet.data = Buffer.from(data);
-    packet.duration = 1n;
-
-    await decoder.decode(packet);
-    packet.unref();
-
-    const frame = await decoder.receive();
-    if (frame) {
-      const width = frame.width;
-      const height = frame.height;
-      frame.unref();
-      return { width, height };
-    }
-
-    return { width: 0, height: 0 };
-  } catch {
-    return { width: 0, height: 0 };
-  } finally {
-    decoder?.close();
   }
 }
