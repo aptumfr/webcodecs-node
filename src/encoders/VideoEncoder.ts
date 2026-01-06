@@ -15,8 +15,7 @@ import { isVideoCodecBaseSupported } from '../capabilities/index.js';
 import { pixelFormatToFFmpeg } from '../codec-utils/formats.js';
 import { NodeAvVideoEncoder } from '../backends/node-av/video/NodeAvVideoEncoder.js';
 import { encodingError, wrapAsWebCodecsError } from '../utils/errors.js';
-import { validateVideoEncoderConfig, validateVideoCodec } from '../utils/codec-validation.js';
-import { getCodecBase, parseCodec } from '../utils/codec-cache.js';
+import { getCodecBase } from '../utils/codec-cache.js';
 import type { VideoColorSpaceInit } from '../formats/color-space.js';
 
 // Import from submodule
@@ -26,6 +25,7 @@ import {
   DEFAULT_MAX_QUEUE_SIZE,
 } from './video/constants.js';
 import { calculateMaxQueueSize } from './video/queue.js';
+import { checkConfigSupport } from './video/config.js';
 import type {
   CodecState,
   AvcEncoderConfig,
@@ -136,75 +136,7 @@ export class VideoEncoder extends WebCodecsEventTarget {
   }
 
   static async isConfigSupported(config: VideoEncoderConfig): Promise<VideoEncoderSupport> {
-    // Validate config - throws TypeError for invalid configs per spec
-    validateVideoEncoderConfig(config);
-
-    // Clone the config per WebCodecs spec
-    const clonedConfig: VideoEncoderConfig = {
-      codec: config.codec,
-      width: config.width,
-      height: config.height,
-    };
-
-    // Copy optional properties if present
-    if (config.displayWidth !== undefined) clonedConfig.displayWidth = config.displayWidth;
-    if (config.displayHeight !== undefined) clonedConfig.displayHeight = config.displayHeight;
-    if (config.bitrate !== undefined) clonedConfig.bitrate = config.bitrate;
-    if (config.framerate !== undefined) clonedConfig.framerate = config.framerate;
-    if (config.hardwareAcceleration !== undefined) clonedConfig.hardwareAcceleration = config.hardwareAcceleration;
-    if (config.alpha !== undefined) clonedConfig.alpha = config.alpha;
-    if (config.scalabilityMode !== undefined) clonedConfig.scalabilityMode = config.scalabilityMode;
-    if (config.bitrateMode !== undefined) clonedConfig.bitrateMode = config.bitrateMode;
-    if (config.latencyMode !== undefined) clonedConfig.latencyMode = config.latencyMode;
-    if (config.format !== undefined) clonedConfig.format = config.format;
-    if (config.avc !== undefined) clonedConfig.avc = { ...config.avc };
-    if (config.hevc !== undefined) clonedConfig.hevc = { ...config.hevc };
-    if (config.av1 !== undefined) clonedConfig.av1 = { ...config.av1 };
-    if (config.colorSpace !== undefined) clonedConfig.colorSpace = { ...config.colorSpace };
-    if (config.maxQueueSize !== undefined) clonedConfig.maxQueueSize = config.maxQueueSize;
-    if (config.contentHint !== undefined) clonedConfig.contentHint = config.contentHint;
-
-    // Check for odd dimensions (required for YUV420)
-    if (config.width % 2 !== 0 || config.height % 2 !== 0) {
-      return { supported: false, config: clonedConfig };
-    }
-
-    // Check for unreasonably large dimensions
-    if (config.width > 16384 || config.height > 16384) {
-      return { supported: false, config: clonedConfig };
-    }
-
-    // Validate codec string format and check if supported
-    const codecValidation = validateVideoCodec(config.codec);
-    if (!codecValidation.supported) {
-      return { supported: false, config: clonedConfig };
-    }
-
-    // Get normalized codec name for capability checks
-    const parsed = parseCodec(config.codec);
-
-    // Alpha channel support: only VP9 software encoding supports alpha
-    // H.264, HEVC, AV1 do not support alpha encoding
-    if (config.alpha === 'keep') {
-      const supportsAlpha = parsed.name === 'vp9' &&
-        config.hardwareAcceleration !== 'prefer-hardware';
-      if (!supportsAlpha) {
-        return { supported: false, config: clonedConfig };
-      }
-    }
-
-    // Quantizer bitrate mode: only some codecs support CRF/CQ mode
-    // H.264, HEVC, VP9, AV1 support quantizer mode
-    // VP8 does not support quantizer mode (uses bitrate-based VBR only)
-    if (config.bitrateMode === 'quantizer') {
-      const supportsQuantizer = parsed.name === 'h264' || parsed.name === 'hevc' ||
-        parsed.name === 'vp9' || parsed.name === 'av1';
-      if (!supportsQuantizer) {
-        return { supported: false, config: clonedConfig };
-      }
-    }
-
-    return { supported: true, config: clonedConfig };
+    return checkConfigSupport(config);
   }
 
   configure(config: VideoEncoderConfig): void {

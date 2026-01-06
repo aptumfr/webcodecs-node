@@ -32,6 +32,7 @@ import {
   MAX_QUEUE_SIZE,
   OPUS_ENCODER_SAMPLE_RATE,
 } from './audio/constants.js';
+import { checkConfigSupport } from './audio/config.js';
 import type {
   CodecState,
   OpusEncoderConfig,
@@ -124,131 +125,7 @@ export class AudioEncoder extends WebCodecsEventTarget {
   }
 
   static async isConfigSupported(config: AudioEncoderConfig): Promise<AudioEncoderSupport> {
-    // Validate required fields and types - throw TypeError for invalid types
-    if (!config || typeof config !== 'object') {
-      throw new TypeError('config must be an object');
-    }
-    if (config.codec === undefined || config.codec === null) {
-      throw new TypeError("Failed to read the 'codec' property from 'AudioEncoderConfig': Required member is undefined.");
-    }
-    if (typeof config.codec !== 'string' || config.codec === '') {
-      throw new TypeError('codec must be a non-empty string');
-    }
-    if (config.sampleRate === undefined || config.sampleRate === null) {
-      throw new TypeError("Failed to read the 'sampleRate' property from 'AudioEncoderConfig': Required member is undefined.");
-    }
-    if (typeof config.sampleRate !== 'number' || !Number.isFinite(config.sampleRate) || config.sampleRate <= 0) {
-      throw new TypeError('sampleRate must be a finite positive number');
-    }
-    if (config.numberOfChannels === undefined || config.numberOfChannels === null) {
-      throw new TypeError("Failed to read the 'numberOfChannels' property from 'AudioEncoderConfig': Required member is undefined.");
-    }
-    if (typeof config.numberOfChannels !== 'number' || !Number.isFinite(config.numberOfChannels) || config.numberOfChannels <= 0 || !Number.isInteger(config.numberOfChannels)) {
-      throw new TypeError('numberOfChannels must be a positive integer');
-    }
-
-    // Validate optional fields
-    if (config.bitrate !== undefined && (typeof config.bitrate !== 'number' || !Number.isFinite(config.bitrate) || config.bitrate <= 0)) {
-      throw new TypeError('bitrate must be a finite positive number');
-    }
-    if (config.bitrateMode !== undefined && !['constant', 'variable'].includes(config.bitrateMode)) {
-      throw new TypeError("bitrateMode must be 'constant' or 'variable'");
-    }
-    if (config.latencyMode !== undefined && !['quality', 'realtime'].includes(config.latencyMode)) {
-      throw new TypeError("latencyMode must be 'quality' or 'realtime'");
-    }
-
-    const codecBase = getCodecBase(config.codec);
-
-    // Validate Opus-specific config per WebCodecs Opus codec registration
-    if (codecBase === 'opus') {
-      // Validate opus.format
-      if (config.opus?.format !== undefined && !['opus', 'ogg'].includes(config.opus.format)) {
-        throw new TypeError("opus.format must be 'opus' or 'ogg'");
-      }
-      // packetlossperc must be 0-100
-      if (config.opus?.packetlossperc !== undefined) {
-        if (typeof config.opus.packetlossperc !== 'number' || config.opus.packetlossperc < 0 || config.opus.packetlossperc > 100) {
-          throw new TypeError('opus.packetlossperc must be a number between 0 and 100');
-        }
-      }
-      // frameDuration must be one of the valid values
-      const validFrameDurations = [2500, 5000, 10000, 20000, 40000, 60000, 80000, 100000, 120000];
-      if (config.opus?.frameDuration !== undefined) {
-        if (!validFrameDurations.includes(config.opus.frameDuration)) {
-          throw new TypeError(`opus.frameDuration must be one of: ${validFrameDurations.join(', ')}`);
-        }
-      }
-      // complexity must be 0-10
-      if (config.opus?.complexity !== undefined) {
-        if (typeof config.opus.complexity !== 'number' || config.opus.complexity < 0 || config.opus.complexity > 10) {
-          throw new TypeError('opus.complexity must be a number between 0 and 10');
-        }
-      }
-      // Validate application
-      if (config.opus?.application !== undefined && !['voip', 'audio', 'lowdelay'].includes(config.opus.application)) {
-        throw new TypeError("opus.application must be 'voip', 'audio', or 'lowdelay'");
-      }
-      // Validate signal
-      if (config.opus?.signal !== undefined && !['auto', 'music', 'voice'].includes(config.opus.signal)) {
-        throw new TypeError("opus.signal must be 'auto', 'music', or 'voice'");
-      }
-      // Validate Opus channel count (1-255 per RFC 6716)
-      if (config.numberOfChannels > 255) {
-        return { supported: false, config };
-      }
-      // Validate Opus bitrate bounds (6kbps - 510kbps per Opus spec)
-      if (config.bitrate !== undefined) {
-        if (config.bitrate < 6000 || config.bitrate > 510000) {
-          return { supported: false, config };
-        }
-      }
-    }
-
-    // Validate AAC-specific config
-    if (config.aac?.format !== undefined && !['aac', 'adts'].includes(config.aac.format)) {
-      throw new TypeError("aac.format must be 'aac' or 'adts'");
-    }
-
-    // Clone the config per WebCodecs spec
-    const clonedConfig: AudioEncoderConfig = {
-      codec: config.codec,
-      sampleRate: config.sampleRate,
-      numberOfChannels: config.numberOfChannels,
-    };
-
-    // Copy optional properties if present
-    if (config.bitrate !== undefined) clonedConfig.bitrate = config.bitrate;
-    if (config.bitrateMode !== undefined) clonedConfig.bitrateMode = config.bitrateMode;
-    if (config.latencyMode !== undefined) clonedConfig.latencyMode = config.latencyMode;
-    if (config.format !== undefined) clonedConfig.format = config.format;
-
-    // Clone Opus config with defaults per WebCodecs Opus codec registration
-    if (codecBase === 'opus') {
-      const opusConfig: OpusEncoderConfig = {
-        // Fill in default values per WebCodecs spec
-        format: config.opus?.format ?? 'opus',
-        frameDuration: config.opus?.frameDuration ?? 20000, // 20ms default
-        application: config.opus?.application ?? 'audio',
-        packetlossperc: config.opus?.packetlossperc ?? 0,
-        useinbandfec: config.opus?.useinbandfec ?? false,
-        usedtx: config.opus?.usedtx ?? false,
-        signal: config.opus?.signal ?? 'auto',
-        complexity: config.opus?.complexity ?? 10, // Max quality by default
-      };
-      clonedConfig.opus = opusConfig;
-    }
-
-    // Clone AAC config (strip unknown fields)
-    if (config.aac) {
-      const aacConfig: AacEncoderConfig = {};
-      if (config.aac.format !== undefined) aacConfig.format = config.aac.format;
-      clonedConfig.aac = aacConfig;
-    }
-
-    const supported = codecBase in AUDIO_ENCODER_CODEC_MAP || config.codec in AUDIO_ENCODER_CODEC_MAP;
-
-    return { supported, config: clonedConfig };
+    return checkConfigSupport(config);
   }
 
   configure(config: AudioEncoderConfig): void {

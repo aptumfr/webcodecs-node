@@ -11,10 +11,24 @@ import type { VideoColorSpaceInit } from '../formats/index.js';
 import { NodeAvImageDecoder } from '../backends/node-av/image/NodeAvImageDecoder.js';
 import { WebPImageDecoder } from '../backends/node-av/image/WebPImageDecoder.js';
 
+// Import from submodule
+import {
+  ImageTrack,
+  ImageTrackListClass,
+  createImageTrackList,
+  type ImageTrackList as ImageTrackListType,
+} from './image/tracks.js';
+import { parseExifOrientation, applyOrientation } from './image/orientation.js';
+import { isReadableStream } from './image/stream.js';
+
 const logger = createLogger('ImageDecoder');
 
 export type ColorSpaceConversion = 'none' | 'default';
 export type PremultiplyAlpha = 'none' | 'premultiply' | 'default';
+
+// Re-export for backwards compatibility
+export { ImageTrack };
+export { ImageTrackListClass as ImageTrackList };
 
 export interface ImageDecoderInit {
   type: string;
@@ -48,173 +62,6 @@ export interface ImageDecodeResult {
   complete: boolean;
 }
 
-/**
- * ImageTrack - Represents an individual image track
- */
-export class ImageTrack {
-  private _animated: boolean;
-  private _frameCount: number;
-  private _repetitionCount: number;
-  private _selected: boolean;
-  private _trackList: ImageTrackList | null = null;
-  private _index: number = -1;
-
-  constructor(options: {
-    animated: boolean;
-    frameCount: number;
-    repetitionCount: number;
-    selected: boolean;
-  }) {
-    this._animated = options.animated;
-    this._frameCount = options.frameCount;
-    this._repetitionCount = options.repetitionCount;
-    this._selected = options.selected;
-  }
-
-  get animated(): boolean { return this._animated; }
-  get frameCount(): number { return this._frameCount; }
-  get repetitionCount(): number { return this._repetitionCount; }
-  get selected(): boolean { return this._selected; }
-
-  /**
-   * Set the selected state of this track.
-   * Setting to true deselects any previously selected track.
-   * Per WebCodecs spec, this allows switching between tracks.
-   */
-  set selected(value: boolean) {
-    if (value === this._selected) return;
-
-    if (value && this._trackList) {
-      // Deselect the currently selected track
-      this._trackList._deselectAll();
-      this._selected = true;
-      this._trackList._updateSelectedIndex(this._index);
-    } else {
-      this._selected = value;
-      if (!value && this._trackList) {
-        this._trackList._updateSelectedIndex(-1);
-      }
-    }
-  }
-
-  /** @internal */
-  _setTrackList(trackList: ImageTrackList, index: number): void {
-    this._trackList = trackList;
-    this._index = index;
-  }
-}
-
-/**
- * ImageTrackList - A list of image tracks
- * Uses a Proxy to support bracket notation (tracks[0]) at runtime
- */
-class ImageTrackListImpl {
-  private _tracks: ImageTrack[] = [];
-  private _selectedIndex: number = -1;
-  private _ready: Promise<void>;
-  private _resolveReady!: () => void;
-
-  constructor() {
-    this._ready = new Promise((resolve) => {
-      this._resolveReady = resolve;
-    });
-  }
-
-  get ready(): Promise<void> { return this._ready; }
-  get length(): number { return this._tracks.length; }
-  get selectedIndex(): number { return this._selectedIndex; }
-
-  get selectedTrack(): ImageTrack | null {
-    if (this._selectedIndex >= 0 && this._selectedIndex < this._tracks.length) {
-      return this._tracks[this._selectedIndex];
-    }
-    return null;
-  }
-
-  /** @internal */
-  _addTrack(track: ImageTrack): void {
-    const index = this._tracks.length;
-    this._tracks.push(track);
-    track._setTrackList(this as unknown as ImageTrackList, index);
-    if (track.selected && this._selectedIndex === -1) {
-      this._selectedIndex = index;
-    }
-  }
-
-  /** @internal */
-  _markReady(): void {
-    this._resolveReady();
-  }
-
-  /** @internal - Deselect all tracks (called when selecting a new track) */
-  _deselectAll(): void {
-    for (const track of this._tracks) {
-      (track as any)._selected = false;
-    }
-  }
-
-  /** @internal - Update the selected index */
-  _updateSelectedIndex(index: number): void {
-    this._selectedIndex = index;
-  }
-
-  /**
-   * Get track by index
-   */
-  get(index: number): ImageTrack | undefined {
-    return this._tracks[index];
-  }
-
-  [Symbol.iterator](): Iterator<ImageTrack> {
-    return this._tracks[Symbol.iterator]();
-  }
-}
-
-/**
- * ImageTrackList interface with numeric indexing support
- */
-export interface ImageTrackList extends ImageTrackListImpl {
-  [index: number]: ImageTrack | undefined;
-}
-
-/**
- * Create an ImageTrackList with Proxy for bracket notation support
- * Per WebCodecs spec, tracks[0] should work at runtime
- */
-export function createImageTrackList(): ImageTrackList {
-  const impl = new ImageTrackListImpl();
-  return new Proxy(impl, {
-    get(target, prop, receiver) {
-      // Handle numeric string properties (e.g., "0", "1")
-      if (typeof prop === 'string' && /^\d+$/.test(prop)) {
-        return target.get(parseInt(prop, 10));
-      }
-      return Reflect.get(target, prop, receiver);
-    },
-    has(target, prop) {
-      if (typeof prop === 'string' && /^\d+$/.test(prop)) {
-        const index = parseInt(prop, 10);
-        return index >= 0 && index < target.length;
-      }
-      return Reflect.has(target, prop);
-    },
-  }) as ImageTrackList;
-}
-
-// For backwards compatibility, also export a class that creates the proxy
-export const ImageTrackList = class {
-  constructor() {
-    return createImageTrackList();
-  }
-} as unknown as { new(): ImageTrackList };
-
-// Supported image types (delegated to node-av)
-const ANIMATED_FORMATS = ['image/gif', 'image/apng', 'image/webp'];
-
-function isReadableStream(obj: unknown): obj is ReadableStream {
-  return typeof obj === 'object' && obj !== null && typeof (obj as ReadableStream).getReader === 'function';
-}
-
 export class ImageDecoder {
   private _type: string;
   private _data: Uint8Array | null = null;
@@ -222,7 +69,7 @@ export class ImageDecoder {
   private _completed: Promise<void>;
   private _resolveCompleted!: () => void;
   private _rejectCompleted!: (error: Error) => void;
-  private _tracks: ImageTrackList;
+  private _tracks: ImageTrackListType;
   private _closed: boolean = false;
   private _colorSpaceConversion: ColorSpaceConversion;
   private _premultiplyAlpha: PremultiplyAlpha;
@@ -271,7 +118,7 @@ export class ImageDecoder {
     this._preferredColorSpace = this._colorSpaceConversion === 'default'
       ? { primaries: 'bt709', transfer: 'iec61966-2-1', matrix: 'rgb', fullRange: true }
       : undefined;
-    this._tracks = new ImageTrackList();
+    this._tracks = createImageTrackList();
 
     this._completed = new Promise((resolve, reject) => {
       this._resolveCompleted = resolve;
@@ -383,7 +230,7 @@ export class ImageDecoder {
     try {
       this._evaluateOrientation();
       await this._parseImage();
-      this._tracks._markReady();
+      (this._tracks as any)._markReady();
       this._resolveCompleted();
     } catch (error) {
       this._rejectCompleted(error as Error);
@@ -419,7 +266,7 @@ export class ImageDecoder {
         repetitionCount: 0, // Still images have repetitionCount=0 per spec
         selected: !this._preferAnimation,
       });
-      this._tracks._addTrack(stillTrack);
+      (this._tracks as any)._addTrack(stillTrack);
 
       const animatedTrack = new ImageTrack({
         animated: true,
@@ -427,7 +274,7 @@ export class ImageDecoder {
         repetitionCount: this._visibleRepetitionCount,
         selected: this._preferAnimation,
       });
-      this._tracks._addTrack(animatedTrack);
+      (this._tracks as any)._addTrack(animatedTrack);
     } else {
       // Single frame image - just one track
       const track = new ImageTrack({
@@ -436,7 +283,7 @@ export class ImageDecoder {
         repetitionCount: 0,
         selected: true,
       });
-      this._tracks._addTrack(track);
+      (this._tracks as any)._addTrack(track);
     }
   }
 
@@ -459,7 +306,7 @@ export class ImageDecoder {
       return;
     }
 
-    const orientation = this._parseExifOrientation(this._data);
+    const orientation = parseExifOrientation(this._data);
     if (orientation && orientation >= 1 && orientation <= 8) {
       this._orientation = orientation;
     }
@@ -518,206 +365,6 @@ export class ImageDecoder {
     }
   }
 
-  private _parseExifOrientation(data: Uint8Array): number | null {
-    if (data.length < 4 || data[0] !== 0xFF || data[1] !== 0xD8) {
-      return null;
-    }
-
-    const readUint16 = (buffer: Uint8Array, offset: number, littleEndian: boolean): number => {
-      if (littleEndian) {
-        return buffer[offset] | (buffer[offset + 1] << 8);
-      }
-      return (buffer[offset] << 8) | buffer[offset + 1];
-    };
-
-    const readUint32 = (buffer: Uint8Array, offset: number, littleEndian: boolean): number => {
-      if (littleEndian) {
-        return (
-          buffer[offset] |
-          (buffer[offset + 1] << 8) |
-          (buffer[offset + 2] << 16) |
-          (buffer[offset + 3] << 24)
-        );
-      }
-      return (
-        (buffer[offset] << 24) |
-        (buffer[offset + 1] << 16) |
-        (buffer[offset + 2] << 8) |
-        buffer[offset + 3]
-      );
-    };
-
-    let offset = 2;
-
-    while (offset + 4 < data.length) {
-      if (data[offset] !== 0xFF) {
-        break;
-      }
-      const marker = data[offset + 1];
-      offset += 2;
-
-      if (marker === 0xD9 || marker === 0xDA) {
-        break;
-      }
-
-      if (offset + 2 > data.length) {
-        break;
-      }
-
-      const segmentLength = (data[offset] << 8) | data[offset + 1];
-      if (segmentLength < 2) {
-        break;
-      }
-
-      const segmentStart = offset + 2;
-      const segmentEnd = segmentStart + segmentLength - 2;
-
-      if (segmentEnd > data.length) {
-        break;
-      }
-
-      if (marker === 0xE1 && segmentLength >= 8) {
-        const hasExifHeader =
-          data[segmentStart] === 0x45 && // E
-          data[segmentStart + 1] === 0x78 && // x
-          data[segmentStart + 2] === 0x69 && // i
-          data[segmentStart + 3] === 0x66 && // f
-          data[segmentStart + 4] === 0x00 &&
-          data[segmentStart + 5] === 0x00;
-
-        if (hasExifHeader) {
-          const tiffStart = segmentStart + 6;
-          if (tiffStart + 8 > data.length) {
-            return null;
-          }
-
-          const byteOrder = String.fromCharCode(data[tiffStart], data[tiffStart + 1]);
-          const littleEndian = byteOrder === 'II';
-          const bigEndian = byteOrder === 'MM';
-          if (!littleEndian && !bigEndian) {
-            return null;
-          }
-          const isLittleEndian = littleEndian;
-
-          const firstIFDOffset = readUint32(data, tiffStart + 4, isLittleEndian);
-          let ifdOffset = tiffStart + firstIFDOffset;
-
-          if (ifdOffset < tiffStart || ifdOffset + 2 > data.length) {
-            return null;
-          }
-
-          let entryCount = readUint16(data, ifdOffset, isLittleEndian);
-          const entrySize = 12;
-          const maxEntries = Math.floor((data.length - (ifdOffset + 2)) / entrySize);
-          if (entryCount > maxEntries) {
-            entryCount = maxEntries;
-          }
-
-          for (let i = 0; i < entryCount; i++) {
-            const entryOffset = ifdOffset + 2 + i * entrySize;
-            if (entryOffset + entrySize > data.length) {
-              break;
-            }
-
-            const tag = readUint16(data, entryOffset, isLittleEndian);
-            if (tag !== 0x0112) {
-              continue;
-            }
-
-            const type = readUint16(data, entryOffset + 2, isLittleEndian);
-            const count = readUint32(data, entryOffset + 4, isLittleEndian);
-            if (type !== 3 || count < 1) {
-              return null;
-            }
-
-            const valueOffset = entryOffset + 8;
-            if (valueOffset + 2 > data.length) {
-              return null;
-            }
-
-            const orientation = readUint16(data, valueOffset, isLittleEndian);
-            return orientation;
-          }
-        }
-      }
-
-      offset = segmentEnd;
-    }
-
-    return null;
-  }
-
-  private _applyOrientation(
-    data: Uint8Array,
-    width: number,
-    height: number
-  ): { data: Uint8Array; width: number; height: number } {
-    const orientation = this._orientation;
-    if (orientation === 1 || orientation < 1 || orientation > 8) {
-      return { data, width, height };
-    }
-
-    const shouldSwapDimensions = orientation >= 5 && orientation <= 8;
-    const newWidth = shouldSwapDimensions ? height : width;
-    const newHeight = shouldSwapDimensions ? width : height;
-    const transformed = new Uint8Array(newWidth * newHeight * 4);
-
-    const copyPixel = (destX: number, destY: number, srcIndex: number): void => {
-      const destIndex = (destY * newWidth + destX) * 4;
-      transformed[destIndex] = data[srcIndex];
-      transformed[destIndex + 1] = data[srcIndex + 1];
-      transformed[destIndex + 2] = data[srcIndex + 2];
-      transformed[destIndex + 3] = data[srcIndex + 3];
-    };
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const srcIndex = (y * width + x) * 4;
-        let destX = x;
-        let destY = y;
-
-        switch (orientation) {
-          case 2:
-            destX = width - 1 - x;
-            destY = y;
-            break;
-          case 3:
-            destX = width - 1 - x;
-            destY = height - 1 - y;
-            break;
-          case 4:
-            destX = x;
-            destY = height - 1 - y;
-            break;
-          case 5:
-            destX = y;
-            destY = x;
-            break;
-          case 6:
-            destX = height - 1 - y;
-            destY = x;
-            break;
-          case 7:
-            destX = height - 1 - y;
-            destY = width - 1 - x;
-            break;
-          case 8:
-            destX = y;
-            destY = width - 1 - x;
-            break;
-          default:
-            destX = x;
-            destY = y;
-            break;
-        }
-
-        copyPixel(destX, destY, srcIndex);
-      }
-    }
-
-    return { data: transformed, width: newWidth, height: newHeight };
-  }
-
   private async _decodeWithNodeAv(): Promise<void> {
     if (!this._data) return;
 
@@ -741,7 +388,7 @@ export class ImageDecoder {
           : frame.data;
         // Apply orientation correction for JPEG (only for RGBA)
         const oriented = frame.format === 'RGBA'
-          ? this._applyOrientation(processed, frame.width, frame.height)
+          ? applyOrientation(processed, frame.width, frame.height, this._orientation)
           : { data: processed, width: frame.width, height: frame.height };
 
         this._frames.push({
@@ -822,7 +469,7 @@ export class ImageDecoder {
 
   get complete(): boolean { return this._complete; }
   get completed(): Promise<void> { return this._completed; }
-  get tracks(): ImageTrackList { return this._tracks; }
+  get tracks(): ImageTrackListType { return this._tracks; }
   get type(): string { return this._type; }
 
   static async isTypeSupported(type: string): Promise<boolean> {
@@ -892,7 +539,7 @@ export class ImageDecoder {
     this._visibleFrameCount = 0;
     this._visibleAnimated = false;
     this._visibleRepetitionCount = 0;
-    this._tracks = new ImageTrackList();
+    this._tracks = createImageTrackList();
     this._complete = false;
     this._completed = new Promise((resolve, reject) => {
       this._resolveCompleted = resolve;

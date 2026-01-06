@@ -4,7 +4,6 @@
  */
 
 import { WebCodecsEventTarget } from '../utils/event-target.js';
-import { toUint8Array } from '../utils/buffer.js';
 import { Buffer } from 'buffer';
 import { VideoFrame } from '../core/VideoFrame.js';
 import type { VideoPixelFormat } from '../core/VideoFrame.js';
@@ -18,12 +17,12 @@ import type { VideoColorSpaceInit } from '../formats/index.js';
 import { isVideoCodecBaseSupported } from '../capabilities/index.js';
 import { pixelFormatToFFmpeg } from '../codec-utils/formats.js';
 import type { AvcConfig } from '../utils/avc.js';
-import { convertAvccToAnnexB, parseAvcDecoderConfig } from '../utils/avc.js';
+import { convertAvccToAnnexB } from '../utils/avc.js';
 import type { HvccConfig } from '../utils/hevc.js';
-import { convertHvccToAnnexB, parseHvccDecoderConfig } from '../utils/hevc.js';
-import { getCodecBase, parseCodec } from '../utils/codec-cache.js';
+import { convertHvccToAnnexB } from '../utils/hevc.js';
+import { getCodecBase } from '../utils/codec-cache.js';
 import { encodingError, wrapAsWebCodecsError } from '../utils/errors.js';
-import { validateVideoDecoderConfig, validateVideoCodec } from '../utils/codec-validation.js';
+import { validateVideoDecoderConfig } from '../utils/codec-validation.js';
 
 // Import from submodule
 import {
@@ -32,6 +31,12 @@ import {
   DEFAULT_MAX_QUEUE_SIZE,
 } from './video/constants.js';
 import { calculateMaxQueueSize } from './video/queue.js';
+import {
+  parseAvcDescription,
+  parseHevcDescription,
+  getDescriptionBuffer,
+} from './video/codec-specific.js';
+import { checkConfigSupport } from './video/config.js';
 import type { CodecState, VideoDecoderConfig, VideoDecoderInit, VideoDecoderSupport } from './video/types.js';
 
 // Re-export types for backward compatibility
@@ -110,70 +115,7 @@ export class VideoDecoder extends WebCodecsEventTarget {
   }
 
   static async isConfigSupported(config: VideoDecoderConfig): Promise<VideoDecoderSupport> {
-    // Validate config - throws TypeError for invalid configs per spec
-    validateVideoDecoderConfig(config);
-
-    // Clone the config per WebCodecs spec
-    // Description is parsed and stored as Uint8Array if provided
-    const clonedConfig: VideoDecoderConfig = {
-      codec: config.codec,
-    };
-
-    // Copy optional properties if present
-    if (config.codedWidth !== undefined) clonedConfig.codedWidth = config.codedWidth;
-    if (config.codedHeight !== undefined) clonedConfig.codedHeight = config.codedHeight;
-    if (config.displayAspectWidth !== undefined) clonedConfig.displayAspectWidth = config.displayAspectWidth;
-    if (config.displayAspectHeight !== undefined) clonedConfig.displayAspectHeight = config.displayAspectHeight;
-    if (config.colorSpace !== undefined) clonedConfig.colorSpace = { ...config.colorSpace };
-    if (config.hardwareAcceleration !== undefined) clonedConfig.hardwareAcceleration = config.hardwareAcceleration;
-    if (config.optimizeForLatency !== undefined) clonedConfig.optimizeForLatency = config.optimizeForLatency;
-    if (config.outputFormat !== undefined) clonedConfig.outputFormat = config.outputFormat;
-    if (config.maxQueueSize !== undefined) clonedConfig.maxQueueSize = config.maxQueueSize;
-
-    // Parse description if provided (convert BufferSource to Uint8Array)
-    if (config.description !== undefined) {
-      try {
-        clonedConfig.description = toUint8Array(config.description);
-      } catch {
-        return { supported: false, config: clonedConfig };
-      }
-    }
-
-    // Validate codec string format and check if supported
-    const codecValidation = validateVideoCodec(config.codec);
-    if (!codecValidation.supported) {
-      return { supported: false, config: clonedConfig };
-    }
-
-    // Note: displayAspectWidth/Height validation is now in validateVideoDecoderConfig
-    // and throws TypeError for invalid values
-
-    // Check outputFormat compatibility
-    if (config.outputFormat) {
-      // Validate the requested output format is supported
-      if (!SUPPORTED_OUTPUT_FORMATS.includes(config.outputFormat)) {
-        return { supported: false, config: clonedConfig };
-      }
-
-      // Some formats have codec-specific limitations
-      const parsed = parseCodec(config.codec);
-
-      // 10-bit output formats require codecs that support 10-bit decoding
-      const is10BitFormat = config.outputFormat === 'I420P10' ||
-        config.outputFormat === 'I422P10' ||
-        config.outputFormat === 'I444P10' ||
-        config.outputFormat === 'P010';
-
-      if (is10BitFormat) {
-        // Only HEVC, VP9, and AV1 support 10-bit content
-        const supports10Bit = parsed.name === 'hevc' || parsed.name === 'vp9' || parsed.name === 'av1';
-        if (!supports10Bit) {
-          return { supported: false, config: clonedConfig };
-        }
-      }
-    }
-
-    return { supported: true, config: clonedConfig };
+    return checkConfigSupport(config);
   }
 
   configure(config: VideoDecoderConfig): void {
@@ -202,8 +144,8 @@ export class VideoDecoder extends WebCodecsEventTarget {
     this._state = 'configured';
     this._pendingChunks.clear();
     this._codecBase = getCodecBase(config.codec); // Cache for decode() hot path
-    this._avcConfig = this._parseAvcDescription(config);
-    this._hevcConfig = this._parseHevcDescription(config);
+    this._avcConfig = parseAvcDescription(config);
+    this._hevcConfig = parseHevcDescription(config);
     this._hardwarePreference = config.hardwareAcceleration ?? 'no-preference';
 
     // Set max queue size: use config value, or calculate from dimensions, or use default
@@ -401,7 +343,7 @@ export class VideoDecoder extends WebCodecsEventTarget {
     // because VPS/SPS/PPS are already included in the converted keyframe data.
     // Passing HVCC extradata makes FFmpeg expect length-prefixed packets.
     const shouldPassDescription = !this._avcConfig && !this._hevcConfig;
-    const description = shouldPassDescription ? this._getDescriptionBuffer() : null;
+    const description = shouldPassDescription ? getDescriptionBuffer(this._config) : null;
 
     this._decoder = new NodeAvVideoDecoder();
 
@@ -435,56 +377,6 @@ export class VideoDecoder extends WebCodecsEventTarget {
     if (this._decoder) {
       this._decoder.kill();
       this._decoder = null;
-    }
-  }
-
-  private _parseAvcDescription(config: VideoDecoderConfig): AvcConfig | null {
-    if (!config.description) {
-      return null;
-    }
-
-    const codecBase = getCodecBase(config.codec);
-    if (codecBase !== 'avc1' && codecBase !== 'avc3') {
-      return null;
-    }
-
-    try {
-      const bytes = toUint8Array(config.description);
-      const copy = new Uint8Array(bytes);
-      return parseAvcDecoderConfig(copy);
-    } catch {
-      return null;
-    }
-  }
-
-  private _parseHevcDescription(config: VideoDecoderConfig): HvccConfig | null {
-    if (!config.description) {
-      return null;
-    }
-
-    const codecBase = getCodecBase(config.codec);
-    if (codecBase !== 'hvc1' && codecBase !== 'hev1') {
-      return null;
-    }
-
-    try {
-      const bytes = toUint8Array(config.description);
-      const copy = new Uint8Array(bytes);
-      return parseHvccDecoderConfig(copy);
-    } catch {
-      return null;
-    }
-  }
-
-  private _getDescriptionBuffer(): Uint8Array | null {
-    if (!this._config?.description) {
-      return null;
-    }
-
-    try {
-      return toUint8Array(this._config.description);
-    } catch {
-      return null;
     }
   }
 
