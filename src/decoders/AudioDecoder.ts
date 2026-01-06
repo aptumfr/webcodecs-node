@@ -23,28 +23,12 @@ import { NodeAvAudioDecoder } from '../node-av/NodeAvAudioDecoder.js';
 import { getCodecBase } from '../utils/codec-cache.js';
 import { encodingError, wrapAsWebCodecsError } from '../utils/errors.js';
 
-export type CodecState = 'unconfigured' | 'configured' | 'closed';
+// Import from submodule
+import { DEFAULT_FLUSH_TIMEOUT, MAX_QUEUE_SIZE } from './audio/constants.js';
+import type { CodecState, AudioDecoderConfig, AudioDecoderInit, AudioDecoderSupport } from './audio/types.js';
 
-export interface AudioDecoderConfig {
-  codec: string;
-  sampleRate: number;
-  numberOfChannels: number;
-  description?: ArrayBuffer | ArrayBufferView;
-  outputFormat?: AudioSampleFormat;
-}
-
-export interface AudioDecoderInit {
-  output: (data: AudioData) => void;
-  error: (error: Error) => void;
-}
-
-export interface AudioDecoderSupport {
-  supported: boolean;
-  config: AudioDecoderConfig;
-}
-
-const DEFAULT_FLUSH_TIMEOUT = 30000;
-const MAX_QUEUE_SIZE = 100; // Prevent unbounded memory growth
+// Re-export types for backward compatibility
+export type { CodecState, AudioDecoderConfig, AudioDecoderInit, AudioDecoderSupport } from './audio/types.js';
 
 export class AudioDecoder extends WebCodecsEventTarget {
   private _state: CodecState = 'unconfigured';
