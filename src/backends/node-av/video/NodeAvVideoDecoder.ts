@@ -20,21 +20,21 @@ import type {
   VideoDecoderBackend,
   VideoDecoderBackendConfig,
   DecodedFrame,
-} from '../backends/types.js';
-import type { VideoColorSpaceInit } from '../formats/color-space.js';
-import { extractColorSpaceFromFrame } from '../formats/color-space.js';
-import { DEFAULT_FRAMERATE } from '../backends/types.js';
-import { parseCodecString } from '../hardware/index.js';
-import { createLogger } from '../utils/logger.js';
-import { selectBestFilterChain, getNextFilterChain, describePipeline } from './HardwarePipeline.js';
-import { acquireHardwareContext, releaseHardwareContext } from '../utils/hardware-pool.js';
+} from '../../types.js';
+import type { VideoColorSpaceInit } from '../../../formats/color-space.js';
+import { extractColorSpaceFromFrame } from '../../../formats/color-space.js';
+import { DEFAULT_FRAMERATE } from '../../types.js';
+import { parseCodecString } from '../../../hardware/index.js';
+import { createLogger } from '../../../utils/logger.js';
+import { selectBestFilterChain, getNextFilterChain, describePipeline } from '../HardwarePipeline.js';
+import { acquireHardwareContext, releaseHardwareContext } from '../../../utils/hardware-pool.js';
 import {
   MAX_FILTER_CHAIN_ATTEMPTS,
   SKIP_HARDWARE_CODECS,
   mapCodecId,
   mapPixelFormat,
   pixelFormatToFFmpegName,
-} from './video-decoder/index.js';
+} from './decoder/index.js';
 
 const logger = createLogger('NodeAvVideoDecoder');
 

@@ -22,4 +22,4 @@ export {
   clearPipelineCache,
   getPipelineCacheStatus,
   type HardwareType,
-} from '../../node-av/HardwarePipeline.js';
+} from './HardwarePipeline.js';

@@ -25,10 +25,10 @@ import type {
   AudioEncoderBackend,
   AudioEncoderBackendConfig,
   EncodedFrame,
-} from '../backends/types.js';
-import { createLogger } from '../utils/logger.js';
+} from '../../types.js';
+import { createLogger } from '../../../utils/logger.js';
 
-// Import from audio-encoder submodule
+// Import from encoder submodule
 import {
   OPUS_SAMPLE_RATE,
   getEncoderName,
@@ -39,7 +39,7 @@ import {
   convertToS32Interleaved,
   convertToS16Planar,
   convertToU8Interleaved,
-} from './audio-encoder/index.js';
+} from './encoder/index.js';
 
 const logger = createLogger('NodeAvAudioEncoder');
 

@@ -13,9 +13,9 @@ import { Decoder, Demuxer, FilterAPI } from 'node-av/api';
 import { FormatContext, Packet, Stream, Rational } from 'node-av/lib';
 import { AVMEDIA_TYPE_VIDEO, type AVCodecID } from 'node-av/constants';
 
-import type { VideoPixelFormat } from '../core/VideoFrame.js';
-import { extractColorSpaceFromFrame } from '../formats/color-space.js';
-import { pixelFormatToFFmpeg } from '../codec-utils/formats.js';
+import type { VideoPixelFormat } from '../../../core/VideoFrame.js';
+import { extractColorSpaceFromFrame } from '../../../formats/color-space.js';
+import { pixelFormatToFFmpeg } from '../../../codec-utils/formats.js';
 import {
   type DecodedImageFrame,
   type ImageDecoderConfig,
@@ -23,7 +23,7 @@ import {
   DEMUXER_FORMATS,
   DEFAULT_FRAME_DURATION,
   probeImageDimensions,
-} from './image-decoder/index.js';
+} from './decoder/index.js';
 
 // Re-export types and utilities from submodule
 export type { DecodedImageFrame, ImageDecoderConfig };

@@ -6,8 +6,8 @@
  */
 
 import WebP from 'node-webpmux';
-import type { VideoColorSpaceInit } from '../formats/index.js';
-import type { VideoPixelFormat } from '../core/VideoFrame.js';
+import type { VideoColorSpaceInit } from '../../../formats/index.js';
+import type { VideoPixelFormat } from '../../../core/VideoFrame.js';
 
 export interface DecodedWebPFrame {
   data: Uint8Array;

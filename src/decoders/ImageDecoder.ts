@@ -8,8 +8,8 @@ import type { VideoPixelFormat } from '../core/VideoFrame.js';
 import { DOMException } from '../types/index.js';
 import { createLogger } from '../utils/index.js';
 import type { VideoColorSpaceInit } from '../formats/index.js';
-import { NodeAvImageDecoder } from '../node-av/NodeAvImageDecoder.js';
-import { WebPImageDecoder } from '../node-av/WebPImageDecoder.js';
+import { NodeAvImageDecoder } from '../backends/node-av/image/NodeAvImageDecoder.js';
+import { WebPImageDecoder } from '../backends/node-av/image/WebPImageDecoder.js';
 
 const logger = createLogger('ImageDecoder');
 

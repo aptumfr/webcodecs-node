@@ -16,7 +16,7 @@ import {
   AUDIO_ENCODER_CODEC_MAP,
 } from '../codec-utils/audio-codecs.js';
 import { buildAudioSpecificConfig, stripAdtsHeader } from '../utils/aac.js';
-import { NodeAvAudioEncoder } from '../node-av/NodeAvAudioEncoder.js';
+import { NodeAvAudioEncoder } from '../backends/node-av/audio/NodeAvAudioEncoder.js';
 import {
   validateNonEmptyString,
   validatePositiveInteger,

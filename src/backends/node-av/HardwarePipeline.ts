@@ -7,7 +7,7 @@
 
 import { FilterAPI, HardwareContext } from 'node-av/api';
 
-import { createLogger } from '../utils/logger.js';
+import { createLogger } from '../../utils/logger.js';
 import { type HardwareType, HARDWARE_CAPABILITIES } from './hardware-pipeline/index.js';
 
 // Re-export types from submodule

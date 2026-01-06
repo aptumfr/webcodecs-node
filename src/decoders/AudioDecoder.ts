@@ -19,7 +19,7 @@ import {
 } from '../codec-utils/audio-codecs.js';
 import type { AacConfig } from '../utils/aac.js';
 import { parseAudioSpecificConfig } from '../utils/aac.js';
-import { NodeAvAudioDecoder } from '../node-av/NodeAvAudioDecoder.js';
+import { NodeAvAudioDecoder } from '../backends/node-av/audio/NodeAvAudioDecoder.js';
 import { getCodecBase } from '../utils/codec-cache.js';
 import { encodingError, wrapAsWebCodecsError } from '../utils/errors.js';
 

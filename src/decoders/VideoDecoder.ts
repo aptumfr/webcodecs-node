@@ -9,7 +9,7 @@ import { Buffer } from 'buffer';
 import { VideoFrame } from '../core/VideoFrame.js';
 import type { VideoPixelFormat } from '../core/VideoFrame.js';
 import { EncodedVideoChunk } from '../core/EncodedVideoChunk.js';
-import { NodeAvVideoDecoder } from '../node-av/NodeAvVideoDecoder.js';
+import { NodeAvVideoDecoder } from '../backends/node-av/video/NodeAvVideoDecoder.js';
 import { DOMException, type NativeFrame, hasUnref } from '../types/index.js';
 
 type EventHandler = ((event: Event) => void) | null;

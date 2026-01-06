@@ -20,16 +20,16 @@ import type {
   AudioDecoderBackend,
   AudioDecoderBackendConfig,
   DecodedFrame,
-} from '../backends/types.js';
-import type { AudioSampleFormat } from '../types/audio.js';
-import { createLogger } from '../utils/logger.js';
-import { toUint8Array } from '../utils/buffer.js';
+} from '../../types.js';
+import type { AudioSampleFormat } from '../../../types/audio.js';
+import { createLogger } from '../../../utils/logger.js';
+import { toUint8Array } from '../../../utils/buffer.js';
 import {
   mapCodecId,
   mapSampleFormat,
   sampleFormatToFFmpegName,
   getChannelLayout,
-} from './audio-decoder/index.js';
+} from './decoder/index.js';
 
 const logger = createLogger('NodeAvAudioDecoder');
 

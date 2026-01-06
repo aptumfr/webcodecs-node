@@ -28,34 +28,34 @@ import type {
   VideoEncoderBackend,
   VideoEncoderBackendConfig,
   EncodedFrame,
-} from '../backends/types.js';
+} from '../../types.js';
 import {
   DEFAULT_FRAMERATE,
   DEFAULT_VP_BITRATE,
   CRF_DEFAULTS,
-} from '../backends/types.js';
-import { parseCodecString, getBestEncoderSync } from '../hardware/index.js';
-import { createLogger } from '../utils/logger.js';
+} from '../../types.js';
+import { parseCodecString, getBestEncoderSync } from '../../../hardware/index.js';
+import { createLogger } from '../../../utils/logger.js';
 import {
   extractHevcParameterSetsFromAnnexB,
   buildHvccDecoderConfig,
   convertAnnexBToHvcc,
-} from '../utils/hevc.js';
+} from '../../../utils/hevc.js';
 import {
   extractAvcParameterSetsFromAnnexB,
   buildAvcDecoderConfig,
   convertAnnexBToAvcc,
-} from '../utils/avc.js';
-import { acquireHardwareContext, releaseHardwareContext } from '../utils/hardware-pool.js';
-import { getQualityConfig } from '../config/webcodecs-config.js';
+} from '../../../utils/avc.js';
+import { acquireHardwareContext, releaseHardwareContext } from '../../../utils/hardware-pool.js';
+import { getQualityConfig } from '../../../config/webcodecs-config.js';
 
-// Import from video-encoder submodule
+// Import from encoder submodule
 import {
   mapPixelFormat,
   getSoftwareEncoder,
   getHardwareMinResolution,
   buildGpuFilterChain,
-} from './video-encoder/index.js';
+} from './encoder/index.js';
 
 const logger = createLogger('NodeAvVideoEncoder');
 

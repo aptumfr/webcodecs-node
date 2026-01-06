@@ -2,8 +2,8 @@
  * Image decoder type definitions
  */
 
-import type { VideoColorSpaceInit } from '../../formats/index.js';
-import type { VideoPixelFormat } from '../../core/VideoFrame.js';
+import type { VideoColorSpaceInit } from '../../../../formats/index.js';
+import type { VideoPixelFormat } from '../../../../core/VideoFrame.js';
 
 export interface DecodedImageFrame {
   data: Uint8Array;

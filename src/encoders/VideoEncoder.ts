@@ -13,7 +13,7 @@ type EventHandler = ((event: Event) => void) | null;
 import type { VideoPixelFormat } from '../core/VideoFrame.js';
 import { isVideoCodecBaseSupported } from '../capabilities/index.js';
 import { pixelFormatToFFmpeg } from '../codec-utils/formats.js';
-import { NodeAvVideoEncoder } from '../node-av/NodeAvVideoEncoder.js';
+import { NodeAvVideoEncoder } from '../backends/node-av/video/NodeAvVideoEncoder.js';
 import { encodingError, wrapAsWebCodecsError } from '../utils/errors.js';
 import { validateVideoEncoderConfig, validateVideoCodec } from '../utils/codec-validation.js';
 import { getCodecBase, parseCodec } from '../utils/codec-cache.js';

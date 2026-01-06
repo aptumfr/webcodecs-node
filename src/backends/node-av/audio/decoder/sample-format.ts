@@ -14,7 +14,7 @@ import {
   type AVSampleFormat,
 } from 'node-av/constants';
 
-import type { AudioSampleFormat } from '../../types/audio.js';
+import type { AudioSampleFormat } from '../../../../types/audio.js';
 
 /**
  * Map WebCodecs AudioSampleFormat to FFmpeg AVSampleFormat
