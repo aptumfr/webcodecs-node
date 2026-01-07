@@ -22,6 +22,7 @@ import {
   type AVPixelFormat,
   type FFEncoderCodec,
   AV_PKT_FLAG_KEY,
+  AV_PICTURE_TYPE_I,
 } from 'node-av/constants';
 
 import type {
@@ -68,7 +69,7 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
   private filter: FilterAPI | null = null;
   private config: VideoEncoderBackendConfig | null = null;
   private frameIndex = 0;
-  private queue: Array<{ buffer?: Buffer; frame?: Frame; owned?: boolean; timestamp: number }> = [];
+  private queue: Array<{ buffer?: Buffer; frame?: Frame; owned?: boolean; timestamp: number; keyFrame?: boolean }> = [];
   private processing = false;
   private processingPromise: Promise<void> | null = null;
   private shuttingDown = false;
@@ -100,22 +101,24 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     }
   }
 
-  write(data: Buffer | Uint8Array, timestamp?: number): boolean {
+  write(data: Buffer | Uint8Array, timestamp?: number, keyFrame?: boolean): boolean {
     if (!this.config || this.shuttingDown) {
       return false;
     }
 
-    this.queue.push({ buffer: Buffer.from(data), owned: true, timestamp: timestamp ?? 0 });
+    // Avoid copy if already a Buffer; only copy Uint8Array to ensure we own the data
+    const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    this.queue.push({ buffer, owned: true, timestamp: timestamp ?? 0, keyFrame });
     void this.processQueue();
     return true;
   }
 
-  writeFrame(frame: Frame, timestamp?: number): boolean {
+  writeFrame(frame: Frame, timestamp?: number, keyFrame?: boolean): boolean {
     if (!this.config || this.shuttingDown) {
       return false;
     }
 
-    this.queue.push({ frame, owned: false, timestamp: timestamp ?? 0 });
+    this.queue.push({ frame, owned: false, timestamp: timestamp ?? 0, keyFrame });
     void this.processQueue();
     return true;
   }
@@ -152,13 +155,13 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
       try {
         while (this.queue.length > 0) {
           const item = this.queue.shift()!;
-          // Emit frameAccepted when frame starts processing (for dequeue event)
-          // Use setImmediate to ensure emit happens after write() returns
+          // Emit frameAccepted asynchronously to ensure write() has returned first.
+          // This is important for backpressure: callers track queue depth via this event.
           setImmediate(() => this.emit('frameAccepted'));
           if (item.frame) {
-            await this.encodeFrame(item.frame, item.owned ?? true, item.timestamp);
+            await this.encodeFrame(item.frame, item.owned ?? true, item.timestamp, item.keyFrame);
           } else if (item.buffer) {
-            await this.encodeBuffer(item.buffer, item.timestamp);
+            await this.encodeBuffer(item.buffer, item.timestamp, item.keyFrame);
           }
         }
       } catch (err) {
@@ -453,6 +456,14 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
       options.deadline = 'good';
       options['cpu-used'] = '4';
     }
+
+    // Apply contentHint to optimize for content type
+    if (this.config?.contentHint === 'text' || this.config?.contentHint === 'detail') {
+      // Text/detail: lower cpu-used for higher quality (slower encoding)
+      const currentCpuUsed = Number(options['cpu-used'] ?? '4');
+      options['cpu-used'] = String(Math.max(0, currentCpuUsed - 2));
+    }
+    // 'motion' uses default settings optimized for video content
   }
 
   private configureSvtAv1Options(options: Record<string, string | number>): void {
@@ -468,6 +479,17 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
       // This enables palette mode and intra block copy which are useful for screen sharing
       options['enable-screen-content-mode'] = '1';
     }
+
+    // Apply contentHint to optimize encoder for content type
+    if (this.config?.contentHint === 'text') {
+      // Text/graphics content: enable screen content tools for better compression
+      options['enable-screen-content-mode'] = '1';
+    } else if (this.config?.contentHint === 'detail') {
+      // Detail mode: prioritize quality over speed
+      const currentPreset = Number(options.preset ?? '6');
+      options.preset = String(Math.max(0, currentPreset - 2)); // Lower preset = higher quality
+    }
+    // 'motion' uses default settings optimized for video content
   }
 
   private configureX26xOptions(options: Record<string, string | number>, hwType?: string): void {
@@ -520,9 +542,23 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
         options.bufsize = String(bitrate * 2);
       }
     }
+
+    // Apply contentHint for software x264/x265 (tune parameter)
+    if (!hwType && this.config?.contentHint) {
+      if (this.config.contentHint === 'text') {
+        // Text/graphics: use stillimage tune for sharp edges
+        options.tune = 'stillimage';
+      } else if (this.config.contentHint === 'detail') {
+        // Detail mode: use ssim tune for quality preservation
+        options.tune = 'ssim';
+      } else if (this.config.contentHint === 'motion') {
+        // Motion content: use film tune (default video optimization)
+        options.tune = 'film';
+      }
+    }
   }
 
-  private async encodeBuffer(buffer: Buffer, timestamp: number): Promise<void> {
+  private async encodeBuffer(buffer: Buffer, timestamp: number, keyFrame?: boolean): Promise<void> {
     await this.ensureEncoder();
     if (!this.encoder || !this.config) {
       throw new Error('Encoder not initialized');
@@ -535,6 +571,11 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     const pts = BigInt(Math.round(timestamp * this.timeBase.den / 1_000_000));
     frame.pts = pts;
 
+    // Force keyframe if requested via encode({ keyFrame: true })
+    if (keyFrame) {
+      frame.pictType = AV_PICTURE_TYPE_I;
+    }
+
     await this.encoder.encode(frame);
     frame.unref();
 
@@ -542,7 +583,7 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     this.frameIndex++;
   }
 
-  private async encodeFrame(inputFrame: Frame, owned: boolean, timestamp: number): Promise<void> {
+  private async encodeFrame(inputFrame: Frame, owned: boolean, timestamp: number, keyFrame?: boolean): Promise<void> {
     await this.ensureEncoder();
     if (!this.encoder || !this.config) {
       throw new Error('Encoder not initialized');
@@ -552,6 +593,11 @@ export class NodeAvVideoEncoder extends EventEmitter implements VideoEncoderBack
     // Convert input timestamp (microseconds) to encoder timebase
     const pts = BigInt(Math.round(timestamp * this.timeBase.den / 1_000_000));
     frame.pts = pts;
+
+    // Force keyframe if requested via encode({ keyFrame: true })
+    if (keyFrame) {
+      frame.pictType = AV_PICTURE_TYPE_I;
+    }
 
     await this.encoder.encode(frame);
     if (owned || frame !== inputFrame) {

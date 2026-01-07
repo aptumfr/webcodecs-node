@@ -58,8 +58,16 @@ export function validateOptionalFields(config: AudioEncoderConfig): void {
  * Returns false if config is unsupported (but valid)
  */
 export function validateOpusConfig(config: AudioEncoderConfig): boolean {
-  if (config.opus?.format !== undefined && !['opus', 'ogg'].includes(config.opus.format)) {
-    throw new TypeError("opus.format must be 'opus' or 'ogg'");
+  if (config.opus?.format !== undefined) {
+    const format = config.opus.format as string; // Cast to handle runtime 'ogg' values
+    if (format === 'ogg') {
+      // 'ogg' format requests Ogg-encapsulated output, but encoders produce raw packets.
+      // Ogg containerization is handled by the muxer, not the encoder.
+      throw new TypeError("opus.format 'ogg' is not supported at encoder level - use 'opus' format and an Ogg muxer");
+    }
+    if (format !== 'opus') {
+      throw new TypeError("opus.format must be 'opus'");
+    }
   }
   if (config.opus?.packetlossperc !== undefined) {
     if (typeof config.opus.packetlossperc !== 'number' || config.opus.packetlossperc < 0 || config.opus.packetlossperc > 100) {

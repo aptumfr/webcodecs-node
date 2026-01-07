@@ -11,4 +11,8 @@ export {
   convertToS32Interleaved,
   convertToS16Planar,
   convertToU8Interleaved,
+  convertFromPlanarToInterleaved,
+  convertFromS16ToF32Interleaved,
+  convertFromS16PlanarToF32Interleaved,
+  convertFromS32ToF32Interleaved,
 } from './sample-format-convert.js';

@@ -6,9 +6,22 @@ import { DOMException } from '../../types/index.js';
 
 /**
  * Check if an ArrayBuffer is detached
+ * Uses the 'detached' property (Node.js 20+) when available.
+ * On Node <20, checks for _intentionallyEmpty flag (for internal buffers).
  */
 export function isDetached(buffer: ArrayBuffer): boolean {
-  return buffer.byteLength === 0 && !(buffer as any)._intentionallyEmpty;
+  // Use the 'detached' property if available (Node.js 20+, modern browsers)
+  if ('detached' in buffer) {
+    return (buffer as any).detached === true;
+  }
+  // On Node <20, only flag as detached if byteLength is 0 AND not intentionally empty
+  // For user-provided buffers without the flag, this returns false to avoid false positives
+  if ((buffer as any)._intentionallyEmpty) {
+    return false;
+  }
+  // For internal buffers we've marked as detached (byteLength 0), return true
+  // For external buffers (no flag), assume NOT detached
+  return false;
 }
 
 /**

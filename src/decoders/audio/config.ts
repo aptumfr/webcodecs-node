@@ -35,22 +35,26 @@ export function validateRequiredFields(config: AudioDecoderConfig): void {
 
 /**
  * Validate description buffer is not detached
+ * Uses the 'detached' property (Node.js 20+) when available.
+ * On Node <20, we can only detect detachment via view/buffer mismatch.
  */
 export function validateDescription(config: AudioDecoderConfig): void {
   if (config.description !== undefined) {
     const desc = config.description;
     if (desc instanceof ArrayBuffer) {
-      // Check if ArrayBuffer is detached (byteLength becomes 0)
-      // Note: Can't distinguish between empty and detached without 'detached' property
-      // In Node.js 20+, we can check the 'detached' property
-      if ((desc as any).detached === true) {
+      // Use the 'detached' property if available (Node.js 20+)
+      if ('detached' in desc && (desc as any).detached === true) {
         throw new TypeError('description buffer is detached');
       }
+      // On Node <20, we cannot reliably detect detachment for ArrayBuffers
+      // without false positives on new ArrayBuffer(0).
     } else if (ArrayBuffer.isView(desc)) {
-      if ((desc.buffer as any).detached === true) {
+      // Use the 'detached' property if available (Node.js 20+)
+      if ('detached' in desc.buffer && (desc.buffer as any).detached === true) {
         throw new TypeError('description buffer is detached');
       }
-      // Also check for views that reference detached buffers
+      // Also check for views that reference detached buffers:
+      // If buffer.byteLength is 0 but view.byteLength is not, the buffer is definitely detached
       if (desc.buffer.byteLength === 0 && desc.byteLength !== 0) {
         throw new TypeError('description buffer is detached');
       }

@@ -13,9 +13,19 @@ export interface EncodedAudioChunkInit {
   transfer?: ArrayBuffer[];
 }
 
-/** Check if an ArrayBuffer is detached */
+/**
+ * Check if an ArrayBuffer is detached
+ * Uses the 'detached' property (Node.js 20+) when available.
+ * On Node <20, we cannot reliably detect detachment so we assume NOT detached.
+ */
 function isDetached(buffer: ArrayBuffer): boolean {
-  return buffer.byteLength === 0;
+  // Use the 'detached' property if available (Node.js 20+, modern browsers)
+  if ('detached' in buffer) {
+    return (buffer as any).detached === true;
+  }
+  // On Node <20, we cannot reliably distinguish empty from detached.
+  // Assume NOT detached to avoid false positives on new ArrayBuffer(0).
+  return false;
 }
 
 /** Validate and detach transfer list buffers */

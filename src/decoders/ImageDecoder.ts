@@ -135,10 +135,12 @@ export class ImageDecoder {
       if (transferSet.has(buffer)) {
         throw new DOMException('Duplicate ArrayBuffer in transfer list', 'DataCloneError');
       }
-      if (buffer.byteLength === 0 && (buffer as any).detached !== false) {
-        // Check for detached buffer (byteLength 0 and not explicitly non-detached)
+      // Use the 'detached' property if available (Node.js 20+)
+      if ('detached' in buffer && (buffer as any).detached === true) {
         throw new DOMException('Cannot transfer a detached ArrayBuffer', 'DataCloneError');
       }
+      // On Node <20, we cannot reliably detect detachment without false positives
+      // on new ArrayBuffer(0). Assume NOT detached.
       transferSet.add(buffer);
     }
 

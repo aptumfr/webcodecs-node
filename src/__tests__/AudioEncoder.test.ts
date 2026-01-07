@@ -818,15 +818,13 @@ describe('AudioEncoder', () => {
       expect(support.config.opus?.format).toBe('opus');
     });
 
-    it('should accept opus.format = ogg', async () => {
-      const support = await AudioEncoder.isConfigSupported({
+    it('should throw TypeError for opus.format = ogg (not supported at encoder level)', async () => {
+      await expect(AudioEncoder.isConfigSupported({
         codec: 'opus',
         sampleRate: 48000,
         numberOfChannels: 2,
         opus: { format: 'ogg' },
-      });
-      expect(support.supported).toBe(true);
-      expect(support.config.opus?.format).toBe('ogg');
+      })).rejects.toThrow("opus.format 'ogg' is not supported at encoder level - use 'opus' format and an Ogg muxer");
     });
 
     it('should throw TypeError for invalid opus.format', async () => {

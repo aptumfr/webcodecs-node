@@ -68,14 +68,13 @@ export function validateDescriptionNotDetached(
     ? description
     : (description as ArrayBufferView).buffer;
 
-  // Use the more robust check from AudioDecoder
-  const detached = (buffer as any).detached === true ||
-    ((buffer as any).detached === undefined && buffer.byteLength === 0 &&
-     !(description instanceof ArrayBuffer && description.byteLength === 0));
-
-  if (detached) {
+  // Use the 'detached' property if available (Node.js 20+)
+  if ('detached' in buffer && (buffer as any).detached === true) {
     throw new TypeError('description ArrayBuffer is detached');
   }
+  // On Node <20, we cannot reliably detect detachment without false positives
+  // on legitimately empty descriptions (new ArrayBuffer(0)).
+  // Assume NOT detached - if truly detached, operations will fail later.
 }
 
 /**

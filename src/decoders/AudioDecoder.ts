@@ -125,13 +125,16 @@ export class AudioDecoder extends WebCodecsEventTarget {
     if (config.description !== undefined) {
       const desc = config.description;
       const buffer = desc instanceof ArrayBuffer ? desc : (desc as ArrayBufferView).buffer;
-      // Check using Node.js 20+ .detached property or fallback to byteLength check
-      const isDetached = (buffer as any).detached === true ||
-        ((buffer as any).detached === undefined && buffer.byteLength === 0 &&
-         !(desc instanceof ArrayBuffer && desc.byteLength === 0));
-      if (isDetached) {
+      // Use the 'detached' property if available (Node.js 20+)
+      if ('detached' in buffer && (buffer as any).detached === true) {
         throw new TypeError('description ArrayBuffer is detached');
       }
+      // Also check for views that reference detached buffers (buffer.byteLength is 0 but view.byteLength is not)
+      if (!(desc instanceof ArrayBuffer) && buffer.byteLength === 0 && (desc as ArrayBufferView).byteLength !== 0) {
+        throw new TypeError('description ArrayBuffer is detached');
+      }
+      // On Node <20, we cannot reliably detect detachment for bare ArrayBuffers
+      // without false positives on new ArrayBuffer(0). Assume NOT detached.
     }
 
     // Opus with >2 channels requires description (mapping table per WebCodecs spec)

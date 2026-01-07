@@ -56,6 +56,8 @@ export interface VideoEncoderBackendConfig {
   bitrateMode?: 'constant' | 'variable' | 'quantizer';
   latencyMode?: 'quality' | 'realtime';
   alpha?: 'discard' | 'keep';
+  /** Content hint for encoder optimization: 'text' for screen content, 'detail' for high detail, 'motion' for video */
+  contentHint?: 'text' | 'detail' | 'motion';
   hardwareAcceleration?: 'no-preference' | 'prefer-hardware' | 'prefer-software';
   /** Output format: 'annexb' for raw Annex B, 'mp4' for length-prefixed (AVCC/HVCC) */
   format?: 'annexb' | 'mp4';
@@ -82,6 +84,8 @@ export interface VideoDecoderBackendConfig {
  * Opus-specific backend encoder options
  */
 export interface OpusBackendConfig {
+  /** Output format: only 'opus' (raw packets) is supported at encoder level */
+  format?: 'opus';
   frameDuration?: number;
   application?: 'voip' | 'audio' | 'lowdelay';
   packetlossperc?: number;

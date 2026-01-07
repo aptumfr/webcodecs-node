@@ -9,41 +9,46 @@
  * Check if an ArrayBuffer is detached (transferred or neutered).
  *
  * In Node.js 20+, ArrayBuffer has a .detached property.
- * For older versions, we check if byteLength is 0.
+ * For older versions, we use a conservative heuristic:
+ * - If _intentionallyEmpty flag is set, buffer is not detached
+ * - Otherwise, assume NOT detached (false negatives are safer than false positives)
  *
- * Note: An intentionally empty buffer (byteLength 0 but not detached) is
- * distinguished by the optional _intentionallyEmpty flag used in VideoFrame.
+ * Note: On Node <20 without .detached, we cannot reliably distinguish between
+ * an intentionally empty buffer (new ArrayBuffer(0)) and a detached buffer.
+ * We err on the side of NOT detached to avoid false positives.
  */
 export function isDetached(buffer: ArrayBuffer): boolean {
-  // Node.js 20+ has a .detached property
-  if ((buffer as any).detached === true) {
-    return true;
+  // Node.js 20+ has a .detached property - use it if available
+  if ('detached' in buffer) {
+    return (buffer as any).detached === true;
   }
 
-  // Fallback: detached buffers have byteLength 0
-  // But we need to distinguish from intentionally empty buffers
-  if ((buffer as any).detached === false) {
+  // Fallback for Node <20: we can only detect truly detached buffers
+  // if we marked them with _intentionallyEmpty (for our internal buffers)
+  if ((buffer as any)._intentionallyEmpty) {
     return false;
   }
 
-  // If no .detached property exists, use byteLength heuristic
-  // A detached buffer will have byteLength 0
-  return buffer.byteLength === 0 && !(buffer as any)._intentionallyEmpty;
+  // For user-provided buffers on Node <20, we CANNOT reliably detect detachment.
+  // byteLength === 0 could be either a detached buffer OR a legitimately empty one.
+  // We assume NOT detached to avoid false positives on empty buffers.
+  // If the buffer truly is detached, operations will fail naturally later.
+  return false;
 }
 
 /**
  * Check if an ArrayBuffer is detached using strict mode.
  *
- * This is a simpler check that doesn't handle the _intentionallyEmpty flag.
- * Use when you're sure the buffer wasn't intentionally created empty.
+ * This is a stricter check that treats byteLength === 0 as detached on Node <20.
+ * Only use this when you're certain the buffer should NOT be empty.
  */
 export function isDetachedStrict(buffer: ArrayBuffer): boolean {
-  if ((buffer as any).detached === true) {
-    return true;
+  // Node.js 20+ has a .detached property - use it if available
+  if ('detached' in buffer) {
+    return (buffer as any).detached === true;
   }
-  if ((buffer as any).detached === false) {
-    return false;
-  }
+
+  // On Node <20, byteLength === 0 is the only signal we have
   return buffer.byteLength === 0;
 }
 

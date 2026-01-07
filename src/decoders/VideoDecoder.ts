@@ -36,7 +36,7 @@ import {
   parseHevcDescription,
   getDescriptionBuffer,
 } from './video/codec-specific.js';
-import { checkConfigSupport } from './video/config.js';
+import { checkConfigSupport, isOutputFormatSupported } from './video/config.js';
 import type { CodecState, VideoDecoderConfig, VideoDecoderInit, VideoDecoderSupport } from './video/types.js';
 
 // Re-export types for backward compatibility
@@ -132,6 +132,15 @@ export class VideoDecoder extends WebCodecsEventTarget {
 
     if (config.outputFormat !== undefined && !SUPPORTED_OUTPUT_FORMATS.includes(config.outputFormat)) {
       throw new TypeError(`Invalid outputFormat: ${config.outputFormat}`);
+    }
+
+    // Enforce output format compatibility with codec (e.g., 10-bit only for HEVC/VP9/AV1)
+    if (!isOutputFormatSupported(config)) {
+      throw new DOMException(
+        `Output format '${config.outputFormat}' is not supported for codec '${config.codec}'. ` +
+        `10-bit formats (I420P10, I422P10, I444P10, P010) require HEVC, VP9, or AV1.`,
+        'NotSupportedError'
+      );
     }
 
     if (this._decoder) {

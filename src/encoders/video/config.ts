@@ -2,7 +2,7 @@
  * VideoEncoder configuration validation and support checking
  */
 
-import { parseCodec } from '../../utils/codec-cache.js';
+import { parseCodec, getCodecBase } from '../../utils/codec-cache.js';
 import { validateVideoEncoderConfig, validateVideoCodec } from '../../utils/codec-validation.js';
 import type { VideoEncoderConfig, VideoEncoderSupport } from './types.js';
 
@@ -41,9 +41,21 @@ export function cloneConfig(config: VideoEncoderConfig): VideoEncoderConfig {
  * Check dimension constraints for encoder config
  */
 export function areDimensionsSupported(config: VideoEncoderConfig): boolean {
-  // Check for odd dimensions (required for YUV420)
-  if (config.width % 2 !== 0 || config.height % 2 !== 0) {
-    return false;
+  // Check for odd dimensions
+  // VP9 and AV1 (software) support odd dimensions, others require even for YUV420 subsampling
+  const hasOddDimension = config.width % 2 !== 0 || config.height % 2 !== 0;
+  if (hasOddDimension) {
+    const codecBase = getCodecBase(config.codec);
+    const isVp9 = codecBase === 'vp09';
+    const isAv1 = codecBase === 'av01';
+    const prefersHardware = config.hardwareAcceleration === 'prefer-hardware';
+
+    // VP9 and AV1 (software) can handle odd dimensions
+    // Hardware encoders generally cannot
+    const codecSupportsOddDimensions = (isVp9 || isAv1) && !prefersHardware;
+    if (!codecSupportsOddDimensions) {
+      return false;
+    }
   }
 
   // Check for unreasonably large dimensions
@@ -112,6 +124,11 @@ export async function checkConfigSupport(config: VideoEncoderConfig): Promise<Vi
 
   // Check quantizer mode support
   if (!isQuantizerModeSupported(config)) {
+    return { supported: false, config: clonedConfig };
+  }
+
+  // scalabilityMode (SVC) is not supported
+  if (config.scalabilityMode !== undefined && config.scalabilityMode !== '') {
     return { supported: false, config: clonedConfig };
   }
 

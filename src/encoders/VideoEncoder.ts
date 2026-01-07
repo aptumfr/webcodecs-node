@@ -326,11 +326,11 @@ export class VideoEncoder extends WebCodecsEventTarget {
       this._pendingFrames.set(mapKey, [frameInfo]);
     }
 
-    // Pass original timestamp to backend for proper PTS handling
+    // Pass original timestamp and keyFrame hint to backend for proper PTS handling
     const nativeFrame = (frame as any)._native ?? null;
     const writeSuccess = nativeFrame
-      ? this._encoder.writeFrame(nativeFrame, frame.timestamp)
-      : this._encoder.write(frame._buffer, frame.timestamp);
+      ? this._encoder.writeFrame(nativeFrame, frame.timestamp, keyFrame)
+      : this._encoder.write(frame._buffer, frame.timestamp, keyFrame);
     if (!writeSuccess) {
       this._encodeQueueSize = Math.max(0, this._encodeQueueSize - 1);
       // Remove the frame info we just added
@@ -535,11 +535,13 @@ export class VideoEncoder extends WebCodecsEventTarget {
     // not the keyFrame request (which is just a hint to the encoder).
     const isKeyFrame = frame.keyFrame;
 
+    // Use the buffer directly - EncodedVideoChunk will create a view without copying
+    // since we don't use the transfer option
     const chunk = new EncodedVideoChunk({
       type: isKeyFrame ? 'key' : 'delta' as EncodedVideoChunkType,
       timestamp,
       duration,
-      data: new Uint8Array(frame.data),
+      data: frame.data,
     });
 
     // Include decoder config with description on first chunk

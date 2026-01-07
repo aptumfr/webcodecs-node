@@ -11,8 +11,9 @@ export type CodecState = 'unconfigured' | 'configured' | 'closed';
  * https://www.w3.org/TR/webcodecs-opus-codec-registration/
  */
 export interface OpusEncoderConfig {
-  /** Output format: 'opus' for raw Opus, 'ogg' for Ogg-encapsulated */
-  format?: 'opus' | 'ogg';
+  /** Output format: only 'opus' (raw Opus packets) is supported at encoder level.
+   *  'ogg' encapsulation is handled by the muxer, not the encoder. */
+  format?: 'opus';
   /** Frame duration in microseconds (2500, 5000, 10000, 20000, 40000, 60000, 80000, 100000, 120000) */
   frameDuration?: number;
   /** Opus application mode */
