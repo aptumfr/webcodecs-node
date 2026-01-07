@@ -55,6 +55,9 @@ export function validateVideoDecoderConfig(config: unknown): void {
 
 /**
  * Check if a video encoder config is valid (throws TypeError if invalid)
+ *
+ * This is the single source of truth for VideoEncoderConfig validation.
+ * Both isConfigSupported() and configure() use this function.
  */
 export function validateVideoEncoderConfig(config: unknown): void {
   if (!config || typeof config !== 'object') {
@@ -63,43 +66,46 @@ export function validateVideoEncoderConfig(config: unknown): void {
 
   const cfg = config as Record<string, unknown>;
 
+  // Required: codec (non-empty string)
   if (cfg.codec === undefined || cfg.codec === null) {
     throw new TypeError('codec is required');
   }
-
   if (typeof cfg.codec !== 'string' || cfg.codec === '') {
     throw new TypeError('codec must be a non-empty string');
   }
 
+  // Required: width (positive integer per WebCodecs spec)
   if (cfg.width === undefined || cfg.width === null) {
     throw new TypeError('width is required');
   }
-
-  if (typeof cfg.width !== 'number' || cfg.width <= 0 || !Number.isFinite(cfg.width)) {
-    throw new TypeError('width must be a positive number');
+  if (typeof cfg.width !== 'number' || cfg.width <= 0 || !Number.isInteger(cfg.width)) {
+    throw new TypeError('width must be a positive integer');
   }
 
+  // Required: height (positive integer per WebCodecs spec)
   if (cfg.height === undefined || cfg.height === null) {
     throw new TypeError('height is required');
   }
-
-  if (typeof cfg.height !== 'number' || cfg.height <= 0 || !Number.isFinite(cfg.height)) {
-    throw new TypeError('height must be a positive number');
+  if (typeof cfg.height !== 'number' || cfg.height <= 0 || !Number.isInteger(cfg.height)) {
+    throw new TypeError('height must be a positive integer');
   }
 
-  // Optional field validations
+  // Optional: displayWidth (positive number)
   if (cfg.displayWidth !== undefined && (typeof cfg.displayWidth !== 'number' || cfg.displayWidth <= 0)) {
     throw new TypeError('displayWidth must be a positive number');
   }
 
+  // Optional: displayHeight (positive number)
   if (cfg.displayHeight !== undefined && (typeof cfg.displayHeight !== 'number' || cfg.displayHeight <= 0)) {
     throw new TypeError('displayHeight must be a positive number');
   }
 
+  // Optional: bitrate (positive number)
   if (cfg.bitrate !== undefined && (typeof cfg.bitrate !== 'number' || cfg.bitrate <= 0)) {
     throw new TypeError('bitrate must be a positive number');
   }
 
+  // Optional: framerate (positive number)
   if (cfg.framerate !== undefined && (typeof cfg.framerate !== 'number' || cfg.framerate <= 0)) {
     throw new TypeError('framerate must be a positive number');
   }

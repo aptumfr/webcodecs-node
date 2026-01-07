@@ -17,6 +17,7 @@ import { NodeAvVideoEncoder } from '../backends/node-av/video/NodeAvVideoEncoder
 import { encodingError, wrapAsWebCodecsError } from '../utils/errors.js';
 import { getCodecBase } from '../utils/codec-cache.js';
 import type { VideoColorSpaceInit } from '../formats/color-space.js';
+import { validateVideoEncoderConfig } from '../codecs/validation/config.js';
 
 // Import from submodule
 import {
@@ -144,20 +145,10 @@ export class VideoEncoder extends WebCodecsEventTarget {
       throw new DOMException('Encoder is closed', 'InvalidStateError');
     }
 
-    if (!config || typeof config !== 'object') {
-      throw new TypeError('config must be an object');
-    }
-    if (typeof config.codec !== 'string' || config.codec.length === 0) {
-      throw new TypeError('codec must be a non-empty string');
-    }
-    if (typeof config.width !== 'number' || config.width <= 0 || !Number.isInteger(config.width)) {
-      throw new TypeError('width must be a positive integer');
-    }
-    if (typeof config.height !== 'number' || config.height <= 0 || !Number.isInteger(config.height)) {
-      throw new TypeError('height must be a positive integer');
-    }
+    // Use shared validation (single source of truth for TypeError checks)
+    validateVideoEncoderConfig(config);
 
-    // Validate even dimensions for hardware encoder compatibility
+    // Additional constraint: even dimensions for hardware encoder compatibility
     // Many hardware encoders (NVENC, QuickSync, VideoToolbox) fail silently with odd dimensions
     if (config.width % 2 !== 0 || config.height % 2 !== 0) {
       const oddDims: string[] = [];
@@ -170,19 +161,7 @@ export class VideoEncoder extends WebCodecsEventTarget {
       );
     }
 
-    if (config.bitrate !== undefined && (typeof config.bitrate !== 'number' || config.bitrate <= 0)) {
-      throw new TypeError('bitrate must be a positive number');
-    }
-    if (config.framerate !== undefined && (typeof config.framerate !== 'number' || config.framerate <= 0)) {
-      throw new TypeError('framerate must be a positive number');
-    }
-    if (config.displayWidth !== undefined && (typeof config.displayWidth !== 'number' || config.displayWidth <= 0)) {
-      throw new TypeError('displayWidth must be a positive number');
-    }
-    if (config.displayHeight !== undefined && (typeof config.displayHeight !== 'number' || config.displayHeight <= 0)) {
-      throw new TypeError('displayHeight must be a positive number');
-    }
-
+    // Check codec support (NotSupportedError, not TypeError)
     if (!isVideoCodecBaseSupported(config.codec)) {
       throw new DOMException(`Codec '${config.codec}' is not supported`, 'NotSupportedError');
     }
