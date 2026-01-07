@@ -42,6 +42,7 @@
     "demo:dvd": "node dist/demos/demo-dvd-logo.js",
     "demo:visualizer": "node dist/demos/demo-audio-visualizer.js",
     "demo:matrix": "node dist/demos/demo-matrix-rain.js",
+    "demo:flowfield": "node dist/demos/demo-flow-field.js",
     "bench": "node scripts/encoding-benchmark.mjs",
     "bench:quick": "node scripts/encoding-benchmark.mjs --frames 30 --resolution 360p",
     "bench:full": "node scripts/encoding-benchmark.mjs --frames 300 --resolution 1080p"
