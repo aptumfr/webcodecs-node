@@ -1,8 +1,14 @@
 # webcodecs-node
 
+[![npm version](https://img.shields.io/npm/v/webcodecs-node.svg)](https://www.npmjs.com/package/webcodecs-node)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![GitHub](https://img.shields.io/badge/GitHub-aptumfr%2Fwebcodecs--node-blue?logo=github)](https://github.com/aptumfr/webcodecs-node)
+
 WebCodecs API implementation for Node.js using node-av.
 
 This package provides a Node.js-compatible implementation of the [WebCodecs API](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API), enabling video and audio encoding/decoding in server-side JavaScript applications.
+
+**Developed by [Aptum](https://github.com/aptumfr)** - High-performance webcodecs implementation for Node.js.
 
 ## Features
 

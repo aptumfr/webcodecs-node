@@ -1,6 +1,6 @@
 {
   "name": "webcodecs-node",
-  "version": "0.8.0",
+  "version": "0.8.5",
   "description": "WebCodecs API implementation for Node.js using node-av",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -72,12 +72,12 @@
   "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "git+https://github.com/aptumfr/webcodecs-node.git"
   },
   "bugs": {
-    "url": ""
+    "url": "https://github.com/aptumfr/webcodecs-node/issues"
   },
-  "homepage": "",
+  "homepage": "https://github.com/aptumfr/webcodecs-node#readme",
   "dependencies": {
     "node-av": "^5.0.2",
     "node-webpmux": "^3.2.1",
