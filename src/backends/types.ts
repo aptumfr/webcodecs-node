@@ -18,6 +18,8 @@ export interface EncodedFrame {
   keyFrame: boolean;
   /** Optional codec description (e.g., HVCC for HEVC, AVC config for H.264) */
   description?: Buffer;
+  /** Optional duration in samples (audio only) */
+  durationSamples?: number;
 }
 
 /**

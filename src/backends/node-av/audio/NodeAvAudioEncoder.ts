@@ -16,7 +16,6 @@ import {
   AV_SAMPLE_FMT_FLT,
   AV_SAMPLE_FMT_U8,
   AV_SAMPLE_FMT_S32,
-  AV_PKT_FLAG_KEY,
   type AVSampleFormat,
   type FFEncoderCodec,
 } from 'node-av/constants';
@@ -24,7 +23,6 @@ import {
 import type {
   AudioEncoderBackend,
   AudioEncoderBackendConfig,
-  EncodedFrame,
 } from '../../types.js';
 import { createLogger } from '../../../utils/logger.js';
 
@@ -43,6 +41,9 @@ import {
   convertFromS16ToF32Interleaved,
   convertFromS16PlanarToF32Interleaved,
   convertFromS32ToF32Interleaved,
+  buildAudioEncoderOptions,
+  extractCodecDescription,
+  drainAudioPackets,
 } from './encoder/index.js';
 
 const logger = createLogger('NodeAvAudioEncoder');
@@ -60,11 +61,10 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
   private shuttingDown = false;
   private sampleFormat: AVSampleFormat = AV_SAMPLE_FMT_FLT;
   private encoderSampleFormat: AVSampleFormat = AV_SAMPLE_FMT_FLTP;
-  private timeBase: Rational = new Rational(1, 1_000_000); // Microsecond timebase
+  private timeBase: Rational = new Rational(1, 1_000_000);
   private codecDescription: Buffer | null = null;
   private firstFrame = true;
-  private pendingTimestamp = 0; // Track input timestamp for output correlation
-  // Resampling support for Opus with non-48kHz input
+  private pendingTimestamp = 0;
   private resampler: FilterAPI | null = null;
   private needsResampling = false;
   private inputSampleRate = 0;
@@ -80,21 +80,15 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
     const codecName = getEncoderName(config.codec);
     const isOpus = codecName === 'libopus';
 
-    // Store sample rates
     this.inputSampleRate = config.sampleRate;
     this.encoderSampleRate = isOpus ? OPUS_SAMPLE_RATE : config.sampleRate;
 
-    // For Opus with non-48kHz input, we need to resample
     this.needsResampling = isOpus && config.sampleRate !== OPUS_SAMPLE_RATE;
     if (this.needsResampling) {
       logger.info(`Opus requires 48kHz, will resample from ${config.sampleRate}Hz`);
     }
 
-    // Set timeBase to match the ENCODER's sample rate (48kHz for Opus)
-    // This ensures correct timestamp calculations for encoded output
     this.timeBase = new Rational(1, this.encoderSampleRate);
-
-    // Input is always float32 interleaved from AudioData conversion
     this.sampleFormat = AV_SAMPLE_FMT_FLT;
   }
 
@@ -104,8 +98,7 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
     }
 
     this.queue.push({ buffer: Buffer.from(data), owned: true, timestamp: timestamp ?? this.pendingTimestamp });
-    // Advance pending timestamp by the sample count we just added
-    const samplesPerChannel = data.byteLength / 4 / (this.config.numberOfChannels ?? 2); // f32 = 4 bytes
+    const samplesPerChannel = data.byteLength / 4 / (this.config.numberOfChannels ?? 2);
     this.pendingTimestamp += (samplesPerChannel * 1_000_000) / this.config.sampleRate;
     void this.processQueue();
     return true;
@@ -121,7 +114,6 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       if (owned) {
         try { frame.unref(); } catch { /* ignore */ }
       }
-      // Use provided timestamp, or try to get from frame.pts, or default to 0
       let ts = timestamp;
       if (ts === undefined && (frame as any).pts !== undefined) {
         const pts = (frame as any).pts;
@@ -170,7 +162,6 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       try {
         while (this.queue.length > 0) {
           const item = this.queue.shift()!;
-          // Emit frameAccepted when frame starts processing (for dequeue event)
           setImmediate(() => this.emit('frameAccepted'));
           if (item.frame) {
             await this.encodeFrame(item.frame, item.owned ?? true, item.timestamp);
@@ -195,26 +186,31 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
     }
 
     const encoderCodec = getEncoderCodec(this.config.codec);
-    const options = this.buildEncoderOptions();
+    const options = buildAudioEncoderOptions(this.config, this.timeBase);
 
-    // Store the encoder's required sample format
     this.encoderSampleFormat = options.sampleFormat;
 
     logger.info(`Using encoder: ${encoderCodec}, format: ${options.sampleFormat}`);
 
     this.encoder = await Encoder.create(encoderCodec as FFEncoderCodec, options);
 
-    // Create resampler if needed (e.g., Opus with non-48kHz input)
     if (this.needsResampling && !this.resampler) {
-      // Use aresample filter to convert sample rate
-      // The filter handles high-quality resampling via libswresample
       const filterDesc = `aresample=${this.encoderSampleRate}:first_pts=0`;
       this.resampler = FilterAPI.create(filterDesc, {} as any);
       logger.info(`Created resampler: ${this.inputSampleRate}Hz -> ${this.encoderSampleRate}Hz`);
     }
 
-    // Extract codec description (extradata) for codecs that require it
-    this.extractCodecDescription();
+    this.tryExtractCodecDescription();
+  }
+
+  private tryExtractCodecDescription(): void {
+    if (this.codecDescription || !this.encoder || !this.config) return;
+
+    this.codecDescription = extractCodecDescription(this.encoder, {
+      codec: this.config.codec,
+      numberOfChannels: this.config.numberOfChannels,
+      inputSampleRate: this.inputSampleRate,
+    });
   }
 
   private async encodeFrame(inputFrame: Frame, owned: boolean, timestamp?: number): Promise<void> {
@@ -224,14 +220,12 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
         throw new Error('Encoder not initialized');
       }
 
-      // Use provided timestamp or compute from sample position
       const inputTimestamp = timestamp ?? this.pendingTimestamp;
 
       const matchesFormat = inputFrame.format === this.encoderSampleFormat;
       const matchesRate = Number(inputFrame.sampleRate ?? this.config.sampleRate) === this.config.sampleRate;
 
       if (matchesFormat && matchesRate) {
-        // Set PTS based on actual timestamp
         const sampleRate = Number(inputFrame.sampleRate ?? this.config.sampleRate);
         inputFrame.pts = BigInt(Math.round(inputTimestamp * sampleRate / 1_000_000));
         const nbSamples = inputFrame.nbSamples ?? 0;
@@ -244,43 +238,31 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
           this.frameIndex += nbSamples;
           return;
         } catch (err) {
-          // Fallback to buffer path if direct encode fails
           logger.debug(`Direct frame encode failed, falling back to buffer: ${err instanceof Error ? err.message : err}`);
         }
       }
 
-      // Native frame format doesn't match encoder - need to convert
-      // Get native frame properties for proper conversion
       const nativeFormat = inputFrame.format as AVSampleFormat;
-      const nativeSampleRate = Number(inputFrame.sampleRate ?? this.config.sampleRate);
       const nbSamples = inputFrame.nbSamples ?? 0;
       const numChannels = this.config.numberOfChannels;
 
-      // Get raw buffer from native frame
       const rawBuffer = inputFrame.toBuffer();
       if (owned) {
         inputFrame.unref();
       }
 
-      // Convert from native format to f32-interleaved (which encodeBuffer expects)
       let f32Buffer: Buffer;
       if (nativeFormat === AV_SAMPLE_FMT_FLT) {
-        // Already f32 interleaved
         f32Buffer = rawBuffer;
       } else if (nativeFormat === AV_SAMPLE_FMT_FLTP) {
-        // f32 planar -> f32 interleaved
         f32Buffer = Buffer.from(convertFromPlanarToInterleaved(rawBuffer, nbSamples, numChannels));
       } else if (nativeFormat === AV_SAMPLE_FMT_S16) {
-        // s16 interleaved -> f32 interleaved
         f32Buffer = Buffer.from(convertFromS16ToF32Interleaved(rawBuffer, nbSamples, numChannels));
       } else if (nativeFormat === AV_SAMPLE_FMT_S16P) {
-        // s16 planar -> f32 interleaved
         f32Buffer = Buffer.from(convertFromS16PlanarToF32Interleaved(rawBuffer, nbSamples, numChannels));
       } else if (nativeFormat === AV_SAMPLE_FMT_S32) {
-        // s32 interleaved -> f32 interleaved
         f32Buffer = Buffer.from(convertFromS32ToF32Interleaved(rawBuffer, nbSamples, numChannels));
       } else {
-        // For other formats, log warning and try to use as-is (may not work correctly)
         logger.warn(`Unsupported native frame format ${nativeFormat}, attempting direct conversion`);
         f32Buffer = rawBuffer;
       }
@@ -294,259 +276,13 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
     }
   }
 
-  private extractCodecDescription(): void {
-    if (!this.encoder || !this.config) return;
-    if (this.codecDescription) return; // Already extracted
-
-    const codecBase = this.config.codec.split('.')[0].toLowerCase();
-
-    try {
-      const ctx = this.encoder.getCodecContext();
-      if (!ctx) return;
-
-      const extraData = ctx.extraData;
-
-      if (codecBase === 'mp4a' || codecBase === 'aac') {
-        if (!extraData || extraData.length === 0) return;
-        // AAC: extradata contains AudioSpecificConfig (including PCE if needed)
-        // This is the proper description for MP4 muxing and decoding
-        this.codecDescription = Buffer.from(extraData);
-        logger.debug(`AAC description from extradata: ${this.codecDescription.length} bytes`);
-      } else if (codecBase === 'opus') {
-        // Opus: extradata contains OpusHead structure (Identification Header per RFC 7845)
-        // Required for multi-channel Opus decoding and muxing
-        if (extraData && extraData.length > 0) {
-          this.codecDescription = Buffer.from(extraData);
-          logger.debug(`Opus description from extradata: ${this.codecDescription.length} bytes`);
-        } else {
-          // Generate OpusHead manually if FFmpeg didn't provide it
-          this.codecDescription = this.generateOpusHead();
-          logger.debug(`Opus description generated: ${this.codecDescription.length} bytes`);
-        }
-      } else if (codecBase === 'flac') {
-        if (!extraData || extraData.length === 0) return;
-        // FLAC description: 'fLaC' magic + STREAMINFO block
-        // The extradata from FFmpeg is just the STREAMINFO, we need to prepend magic
-        const magic = Buffer.from('fLaC');
-        // STREAMINFO block header: type (0x00 for STREAMINFO) | last-block flag (0x80 if last)
-        // followed by 3-byte length
-        const blockHeader = Buffer.from([0x80, 0x00, 0x00, extraData.length]);
-        this.codecDescription = Buffer.concat([magic, blockHeader, extraData]);
-        logger.debug(`FLAC description: ${this.codecDescription.length} bytes`);
-      } else if (codecBase === 'vorbis') {
-        if (!extraData || extraData.length === 0) return;
-        // Vorbis description is the identification + comment + setup headers
-        // The extradata from FFmpeg should contain all three headers
-        this.codecDescription = Buffer.from(extraData);
-        logger.debug(`Vorbis description: ${this.codecDescription.length} bytes`);
-      }
-    } catch (err) {
-      logger.debug(`Failed to extract codec description: ${err}`);
-    }
-  }
-
-  /**
-   * Generate OpusHead (Identification Header) per RFC 7845 Section 5.1
-   * Used when FFmpeg doesn't provide extradata for Opus encoding
-   */
-  private generateOpusHead(): Buffer {
-    const channels = this.config?.numberOfChannels ?? 2;
-    const sampleRate = this.inputSampleRate || 48000;
-
-    // OpusHead structure:
-    // - Magic Signature: "OpusHead" (8 bytes)
-    // - Version: 1 (1 byte)
-    // - Channel Count (1 byte)
-    // - Pre-skip: samples to skip at start (2 bytes, LE) - 312 is typical for 48kHz
-    // - Input Sample Rate (4 bytes, LE) - original sample rate
-    // - Output Gain: 0 dB (2 bytes, LE)
-    // - Channel Mapping Family (1 byte) - 0 for mono/stereo
-    const preSkip = 312; // Standard pre-skip for Opus at 48kHz
-    const outputGain = 0;
-    const mappingFamily = channels <= 2 ? 0 : 1;
-
-    let headerSize = 19; // Base header size for mapping family 0
-    if (mappingFamily > 0) {
-      // Additional fields for surround: stream count, coupled count, channel mapping
-      headerSize += 2 + channels;
-    }
-
-    const header = Buffer.alloc(headerSize);
-    let offset = 0;
-
-    // Magic Signature
-    header.write('OpusHead', offset);
-    offset += 8;
-
-    // Version
-    header.writeUInt8(1, offset);
-    offset += 1;
-
-    // Channel Count
-    header.writeUInt8(channels, offset);
-    offset += 1;
-
-    // Pre-skip (little-endian)
-    header.writeUInt16LE(preSkip, offset);
-    offset += 2;
-
-    // Input Sample Rate (little-endian)
-    header.writeUInt32LE(sampleRate, offset);
-    offset += 4;
-
-    // Output Gain (little-endian)
-    header.writeInt16LE(outputGain, offset);
-    offset += 2;
-
-    // Channel Mapping Family
-    header.writeUInt8(mappingFamily, offset);
-    offset += 1;
-
-    // For mapping family > 0, add stream info and channel mapping
-    if (mappingFamily > 0) {
-      // Stream count and coupled count for surround
-      const streamCount = channels > 2 ? Math.ceil(channels / 2) : 1;
-      const coupledCount = channels > 2 ? Math.floor(channels / 2) : 0;
-      header.writeUInt8(streamCount, offset);
-      offset += 1;
-      header.writeUInt8(coupledCount, offset);
-      offset += 1;
-      // Channel mapping (identity mapping)
-      for (let i = 0; i < channels; i++) {
-        header.writeUInt8(i, offset);
-        offset += 1;
-      }
-    }
-
-    return header;
-  }
-
-  private buildEncoderOptions() {
-    if (!this.config) {
-      throw new Error('Config not set');
-    }
-
-    const codecBase = this.config.codec.split('.')[0].toLowerCase();
-    const isOpus = codecBase === 'opus';
-    const isVorbis = codecBase === 'vorbis';
-    const isFlac = codecBase === 'flac';
-    const isRealtime = this.config.latencyMode === 'realtime';
-
-    // Determine output sample format based on codec requirements
-    // Each codec has specific format requirements:
-    // - libopus: s16 or flt (interleaved only)
-    // - libvorbis: fltp (planar float)
-    // - aac: fltp (planar float)
-    // - flac: s16, s32 (interleaved signed)
-    let sampleFormat: AVSampleFormat;
-    if (isOpus) {
-      // libopus only supports s16 or flt (interleaved)
-      sampleFormat = AV_SAMPLE_FMT_FLT;
-    } else if (isVorbis) {
-      sampleFormat = AV_SAMPLE_FMT_FLTP;
-    } else if (isFlac || codecBase === 'pcm-s16') {
-      // flac encoder requires interleaved s16 or s32
-      sampleFormat = AV_SAMPLE_FMT_S16;
-    } else if (codecBase === 'pcm-s24' || codecBase === 'pcm-s32') {
-      sampleFormat = AV_SAMPLE_FMT_S32;
-    } else if (codecBase === 'pcm-u8') {
-      sampleFormat = AV_SAMPLE_FMT_U8;
-    } else if (codecBase === 'ulaw' || codecBase === 'alaw') {
-      sampleFormat = AV_SAMPLE_FMT_S16;
-    } else {
-      // Most codecs work with float planar (aac, etc.)
-      sampleFormat = AV_SAMPLE_FMT_FLTP;
-    }
-
-    const options: Record<string, string | number> = {};
-    const isConstantBitrate = this.config.bitrateMode === 'constant';
-    const isVariableBitrate = this.config.bitrateMode === 'variable';
-
-    // Codec-specific options
-    if (isOpus) {
-      const opusConfig = this.config.opus;
-      // Application mode: explicit application takes precedence, then signal hint, then latency mode default
-      let application: string;
-      if (opusConfig?.application !== undefined) {
-        application = opusConfig.application;
-      } else if (opusConfig?.signal !== undefined) {
-        // Map WebCodecs signal hint to libopus application mode
-        // signal: 'voice' → voip, signal: 'music' → audio, signal: 'auto' → audio (general purpose)
-        application = opusConfig.signal === 'voice' ? 'voip' : 'audio';
-      } else {
-        // Default based on latency mode
-        application = isRealtime ? 'voip' : 'audio';
-      }
-      options.application = application;
-      // Frame duration: use config or default for realtime
-      if (opusConfig?.frameDuration !== undefined) {
-        // Convert microseconds to milliseconds for libopus
-        options.frame_duration = String(opusConfig.frameDuration / 1000);
-      } else if (isRealtime) {
-        options.frame_duration = '10';
-      }
-      // Opus VBR control: 'on' (default), 'off' (CBR), 'constrained'
-      if (isConstantBitrate) {
-        options.vbr = 'off';
-      } else if (isVariableBitrate) {
-        options.vbr = 'on';
-      }
-      // Packet loss percentage for FEC
-      if (opusConfig?.packetlossperc !== undefined) {
-        options.packet_loss = String(opusConfig.packetlossperc);
-      }
-      // In-band FEC
-      if (opusConfig?.useinbandfec !== undefined) {
-        options.fec = opusConfig.useinbandfec ? '1' : '0';
-      }
-      // Discontinuous transmission
-      if (opusConfig?.usedtx !== undefined) {
-        options.dtx = opusConfig.usedtx ? '1' : '0';
-      }
-      // Complexity (0-10)
-      if (opusConfig?.complexity !== undefined) {
-        options.compression_level = String(opusConfig.complexity);
-      }
-    }
-
-    // AAC bitrateMode: CBR uses bitrate, VBR uses global_quality
-    if (codecBase === 'aac' || codecBase === 'mp4a') {
-      if (isVariableBitrate && !this.config.bitrate) {
-        // VBR mode with quality-based encoding (1-5 scale for libfdk_aac, 0.1-2 for native aac)
-        // Use a reasonable default quality
-        options.global_quality = 4;
-      }
-      // CBR is default when bitrate is specified
-    }
-
-    // Frame size configuration for specific codecs
-    if (isFlac) {
-      // FLAC default block size is 4608 samples, which is too large for small inputs
-      // Use a smaller frame size to allow encoding of smaller buffers
-      options.frame_size = '1024';
-    }
-
-    return {
-      type: 'audio' as const,
-      sampleRate: isOpus ? OPUS_SAMPLE_RATE : this.config.sampleRate,
-      channelLayout: getChannelLayout(this.config.numberOfChannels),
-      sampleFormat,
-      timeBase: this.timeBase,
-      bitrate: this.config.bitrate,
-      options,
-    };
-  }
-
   private async encodeBuffer(buffer: Buffer, timestamp?: number): Promise<void> {
     await this.ensureEncoder();
     if (!this.encoder || !this.config) {
       throw new Error('Encoder not initialized');
     }
-    // Use provided timestamp or compute from sample position
-    const inputTimestamp = timestamp ?? this.pendingTimestamp;
 
-    // Buffer is f32le interleaved, we need to convert to the encoder's expected format
-    // Calculate number of samples (each sample is 4 bytes for f32)
+    const inputTimestamp = timestamp ?? this.pendingTimestamp;
     const bytesPerSample = 4;
     const totalSamples = buffer.length / bytesPerSample;
     const samplesPerChannel = Math.floor(totalSamples / this.config.numberOfChannels);
@@ -555,36 +291,29 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       return;
     }
 
-    // Prepare audio data based on encoder's expected format
     let audioData: Buffer;
     let frameFormat: AVSampleFormat;
 
     if (this.encoderSampleFormat === AV_SAMPLE_FMT_FLT) {
-      // Encoder needs interleaved float - use input buffer directly
       audioData = buffer;
       frameFormat = AV_SAMPLE_FMT_FLT;
     } else if (this.encoderSampleFormat === AV_SAMPLE_FMT_S16) {
-      // Encoder needs interleaved s16 - convert from f32 interleaved to s16 interleaved
       audioData = Buffer.from(convertToS16Interleaved(buffer, samplesPerChannel, this.config.numberOfChannels));
       frameFormat = AV_SAMPLE_FMT_S16;
     } else if (this.encoderSampleFormat === AV_SAMPLE_FMT_S16P) {
-      // Encoder needs planar s16 - convert from f32 interleaved to s16 planar
       audioData = Buffer.from(convertToS16Planar(buffer, samplesPerChannel, this.config.numberOfChannels));
       frameFormat = AV_SAMPLE_FMT_S16P;
     } else if (this.encoderSampleFormat === AV_SAMPLE_FMT_S32) {
-      // Encoder needs interleaved s32 - convert from f32 interleaved to s32 interleaved
       audioData = Buffer.from(convertToS32Interleaved(buffer, samplesPerChannel, this.config.numberOfChannels));
       frameFormat = AV_SAMPLE_FMT_S32;
     } else if (this.encoderSampleFormat === AV_SAMPLE_FMT_U8) {
       audioData = Buffer.from(convertToU8Interleaved(buffer, samplesPerChannel, this.config.numberOfChannels));
       frameFormat = AV_SAMPLE_FMT_U8;
     } else {
-      // Default: encoder needs planar float - convert from f32 interleaved to f32 planar
       audioData = Buffer.from(convertToPlanar(buffer, samplesPerChannel, this.config.numberOfChannels));
       frameFormat = AV_SAMPLE_FMT_FLTP;
     }
 
-    // Create input frame at INPUT sample rate
     const inputFrame = Frame.fromAudioBuffer(audioData, {
       sampleRate: this.inputSampleRate,
       channelLayout: getChannelLayout(this.config.numberOfChannels),
@@ -593,26 +322,17 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       timeBase: new Rational(1, this.inputSampleRate),
     });
 
-    // If resampling is needed, process through resampler
     if (this.needsResampling && this.resampler) {
-      // Set input PTS based on actual input timestamp (converted to sample units)
-      // PTS = timestamp_us * sampleRate / 1_000_000
       const ptsInSamples = BigInt(Math.round(inputTimestamp * this.inputSampleRate / 1_000_000));
       inputFrame.pts = ptsInSamples;
 
       await this.resampler.process(inputFrame);
       inputFrame.unref();
 
-      // Drain all resampled frames and encode them
-      // Note: receive() returns null when no output is ready yet, undefined/false when done
-      // Track samples output for incrementing PTS of successive frames
       let resampledSamplesOutput = 0;
       let resampledFrame = await this.resampler.receive();
       while (resampledFrame) {
         const outputSamples = resampledFrame.nbSamples ?? 0;
-        // Use input timestamp converted to encoder sample rate for base PTS,
-        // then add samples already output to get correct PTS for each frame
-        // PTS = (timestamp_us * encoderSampleRate / 1_000_000) + samplesAlreadyOutput
         const basePts = BigInt(Math.round(inputTimestamp * this.encoderSampleRate / 1_000_000));
         resampledFrame.pts = basePts + BigInt(resampledSamplesOutput);
 
@@ -622,12 +342,9 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
         resampledSamplesOutput += outputSamples;
         this.frameIndex += outputSamples;
 
-        // Get next frame
         resampledFrame = await this.resampler.receive();
       }
     } else {
-      // No resampling - encode directly
-      // PTS = timestamp_us * sampleRate / 1_000_000
       const ptsInSamples = BigInt(Math.round(inputTimestamp * this.inputSampleRate / 1_000_000));
       inputFrame.pts = ptsInSamples;
       await this.encoder.encode(inputFrame);
@@ -635,10 +352,7 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       this.frameIndex += samplesPerChannel;
     }
 
-    // Try to extract codec description after first encode (some codecs like FLAC
-    // don't populate extradata until after encoding starts)
-    this.extractCodecDescription();
-
+    this.tryExtractCodecDescription();
     await this.drainPackets();
   }
 
@@ -648,13 +362,10 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
       await this.processingPromise;
     }
 
-    // Flush resampler if present - encode any remaining buffered samples
     if (this.resampler && this.encoder) {
       try {
-        // Signal EOF to resampler to flush its internal buffers
         await this.resampler.process(null as any);
 
-        // Drain remaining frames
         let resampledFrame = await this.resampler.receive();
         while (resampledFrame) {
           const outputSamples = resampledFrame.nbSamples ?? 0;
@@ -667,7 +378,6 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
         }
         await this.drainPackets();
       } catch (err) {
-        // Resampler flush errors are non-fatal
         logger.debug(`Resampler flush error: ${err}`);
       }
     }
@@ -688,40 +398,19 @@ export class NodeAvAudioEncoder extends EventEmitter implements AudioEncoderBack
   private async drainPackets(): Promise<void> {
     if (!this.encoder) return;
 
-    let packet = await this.encoder.receive();
-    while (packet) {
-      if (packet.data) {
-        const timestamp = packet.pts !== undefined ? Number(packet.pts) : this.frameIndex;
-        const keyFrame = (packet.flags & AV_PKT_FLAG_KEY) === AV_PKT_FLAG_KEY || (packet as any).isKeyframe;
+    const result = await drainAudioPackets(this.encoder, {
+      codecDescription: this.codecDescription,
+      encoderSampleRate: this.encoderSampleRate,
+      frameIndex: this.frameIndex,
+      firstFrame: this.firstFrame,
+    });
 
-        // Get actual duration from packet (in timebase units), convert to samples
-        // This handles variable frame sizes (PCM, Opus with different frame durations)
-        let durationSamples: number | undefined;
-        if (packet.duration !== undefined && packet.duration > 0n) {
-          const tb = packet.timeBase;
-          if (tb && tb.den > 0) {
-            // duration is in timebase units, convert to samples at encoder sample rate
-            // duration_seconds = duration * (tb.num / tb.den)
-            // duration_samples = duration_seconds * sampleRate
-            durationSamples = Number((packet.duration * BigInt(tb.num) * BigInt(this.encoderSampleRate)) / BigInt(tb.den));
-          }
-        }
+    if (result.firstFrameEmitted) {
+      this.firstFrame = false;
+    }
 
-        const frameData: any = {
-          data: Buffer.from(packet.data),
-          timestamp,
-          keyFrame,
-          durationSamples,
-        };
-        // Include codec description on the first frame
-        if (this.firstFrame && this.codecDescription) {
-          frameData.description = this.codecDescription;
-          this.firstFrame = false;
-        }
-        this.emit('encodedFrame', frameData);
-      }
-      packet.unref();
-      packet = await this.encoder.receive();
+    for (const frame of result.frames) {
+      this.emit('encodedFrame', frame);
     }
   }
 
